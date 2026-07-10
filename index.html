@@ -138,6 +138,7 @@
         <h3><span class="swatch" id="insSwatch"></span> Goblet <span id="insId"></span></h3>
         <div class="row"><span>Generation</span><span id="insGen"></span></div>
         <div class="row"><span>Gender</span><span id="insGender"></span></div>
+        <div class="row"><span>Age</span><span id="insAge"></span></div>
         <div class="row"><span>Status</span><span id="insStatus"></span></div>
         <div class="row"><span>Hunger</span><span id="insHunger"></span></div>
         <div class="row"><span>Thirst</span><span id="insThirst"></span></div>
@@ -147,6 +148,7 @@
         <div class="row"><span>Speed</span><span id="insSpeed"></span></div>
         <div class="row"><span>Adult size</span><span id="insSize"></span></div>
         <div class="row"><span>Current size</span><span id="insCurSize"></span></div>
+        <div class="row"><span>Gene score</span><span id="insScore"></span></div>
     </div>
 
     <script>
@@ -173,12 +175,22 @@
         
         // Reproduction constants
         const FEMALE_REPRO_THRESHOLD = 75; // females need hunger AND thirst >= 75% to breed
-        const MALE_REPRO_THRESHOLD = 60;   // males need hunger AND thirst >= 60% to breed
+        const MALE_REPRO_THRESHOLD = 65;   // males need hunger AND thirst >= 60% to breed
         const MIN_CHILD_SIZE = 6;
         const MAX_CHILD_SIZE = 10;
         const REPRO_COOLDOWN = 6; // seconds a goblet must wait between matings
         const GROW_TIME_SECONDS = 500; // sim-seconds from birth to fully grown (eating speeds this up)
         const EAT_GROWTH_BONUS = 15;   // eating instantly advances growth by this many seconds
+
+        // Aging: sight and speed decline with age so old goblets slow down, struggle
+        // to reach resources, and eventually die — keeping the population in check.
+        const REPRO_MAX_AGE = 2000;    // sim-seconds after which a goblet can no longer breed
+        const AGING_RATE = 0.000075;   // fraction of sight/speed lost per sim-second of age
+        const AGING_FLOOR = 0.15;      // sight/speed never drop below this fraction of base
+        // effective = base * clamp(1 - age*AGING_RATE, AGING_FLOOR, 1)
+        function agingFactor(age) {
+            return Math.max(AGING_FLOOR, 1 - age * AGING_RATE);
+        }
         
         const BERRY_POSITIONS = [
             { dx: -0.22, dy: 0.06 },
@@ -306,6 +318,20 @@
         // Faster movement and a bigger body both make a goblet hungrier.
         function metabolism(g) {
             return (g.genes.speed / SPEED_REF) * 0.6 + (g.currentSize / SIZE_REF) * 0.4;
+        }
+
+        // Genetic quality ("fitness") used when choosing a mate: a goblet breeds
+        // with the highest-quality eligible partner in its sight range.
+        //  + Sight range: pure benefit (finds food/water/mates sooner).
+        //  + Speed: helps reach resources, but costs metabolism -> modest weight.
+        //  - Adult size: only raises hunger cost -> penalized.
+        const GENE_W_SIGHT = 1.0;
+        const GENE_W_SPEED = 0.4;
+        const GENE_W_SIZE  = 0.6;
+        function geneQuality(g) {
+            return (g.genes.sightRange / 100) * GENE_W_SIGHT
+                 + (g.genes.speed / SPEED_REF) * GENE_W_SPEED
+                 - (g.genes.size / SIZE_REF) * GENE_W_SIZE;
         }
 
         // Clamp helper
@@ -441,7 +467,10 @@
                 id: nextGobletId++,
                 generation: 1,
                 gender: gender || (Math.random() < 0.5 ? 'male' : 'female'),
-                parents: [] // starting population has no parents
+                parents: [], // starting population has no parents
+                age: 0,
+                baseSightRange: genes.sightRange, // pristine values before aging decay
+                baseSpeed: genes.speed
             };
             goblets.push(goblet);
             return goblet;
@@ -455,6 +484,7 @@
             // Females need to be better-fed than males to breed.
             let threshold = g.gender === 'female' ? FEMALE_REPRO_THRESHOLD : MALE_REPRO_THRESHOLD;
             return g.isGrown &&
+                   g.age < REPRO_MAX_AGE &&      // too old to breed past this age
                    g.reproCooldown <= 0 &&
                    g.hunger >= threshold &&
                    g.thirst >= threshold;
@@ -463,9 +493,13 @@
         function findMate(goblet) {
             if (!canReproduce(goblet)) return null;
 
-            // Look for the nearest eligible mate within this goblet's sight range
+            // Among all eligible opposite-gender mates within sight range, pick the
+            // one with the BEST genes (highest geneQuality). Distance only decides
+            // ties, so a goblet always chooses its best available option.
             let bestMate = null;
-            let bestDist = goblet.genes.sightRange;
+            let bestQuality = -Infinity;
+            let bestDist = Infinity;
+            let sight = goblet.genes.sightRange;
 
             for (let other of goblets) {
                 if (other === goblet) continue;
@@ -473,7 +507,11 @@
                 if (other.gender === goblet.gender) continue; // only male + female mate
 
                 let dist = Math.hypot(goblet.x - other.x, goblet.y - other.y);
-                if (dist < bestDist) {
+                if (dist > sight) continue; // must be in viewing range
+
+                let q = geneQuality(other);
+                if (q > bestQuality || (q === bestQuality && dist < bestDist)) {
+                    bestQuality = q;
                     bestDist = dist;
                     bestMate = other;
                 }
@@ -562,7 +600,12 @@
                 id: nextGobletId++,
                 generation: Math.max(goblet1.generation, goblet2.generation) + 1,
                 gender: Math.random() < 0.5 ? 'male' : 'female', // 50/50 at birth
-                parents: [goblet1.id, goblet2.id]
+                parents: [goblet1.id, goblet2.id],
+                age: 0,
+                // Offspring inherit their parents' CURRENT (age-decayed) sight/speed:
+                // childGenes was built from the parents' present genes values.
+                baseSightRange: childGenes.sightRange,
+                baseSpeed: childGenes.speed
             };
 
             goblets.push(child);
@@ -606,6 +649,12 @@
                     goblets.splice(i, 1);
                     continue;
                 }
+
+                // Age: sight and speed decay as the goblet gets older.
+                goblet.age += deltaTime;
+                let af = agingFactor(goblet.age);
+                goblet.genes.sightRange = goblet.baseSightRange * af;
+                goblet.genes.speed = goblet.baseSpeed * af;
 
                 // Tick down reproduction cooldown
                 if (goblet.reproCooldown > 0) goblet.reproCooldown -= deltaTime;
@@ -800,6 +849,56 @@
             return Math.atan2(WORLD_HEIGHT / 2 - goblet.y, WORLD_WIDTH / 2 - goblet.x);
         }
 
+        // Smallest absolute difference between two angles (radians).
+        function angleDiff(a, b) {
+            let d = Math.abs(a - b) % (Math.PI * 2);
+            return d > Math.PI ? Math.PI * 2 - d : d;
+        }
+
+        // Heading toward (tx,ty) that smoothly ARCS around any lake blocking the
+        // straight path (tangent-aim navigation). Returns an angle in radians.
+        // Avoids the old "slide into the edge and stall" behaviour that trapped
+        // goblets behind lakes.
+        function steerAroundLakes(goblet, tx, ty) {
+            let dx = tx - goblet.x, dy = ty - goblet.y;
+            let distToTarget = Math.hypot(dx, dy) || 1;
+            let desired = Math.atan2(dy, dx);
+            let cd = Math.cos(desired), sd = Math.sin(desired);
+
+            // Find the nearest lake that actually sits across the path to target.
+            let block = null, blockCDist = Infinity;
+            for (let lake of lakes) {
+                let R = lake.radius + GOBLET_SIZE / 2 + 4;
+                let lx = lake.x - goblet.x, ly = lake.y - goblet.y;
+                let cDist = Math.hypot(lx, ly);
+                let along = lx * cd + ly * sd;        // distance to closest approach
+                if (along <= 0) continue;             // lake is behind us
+                if (along - R > distToTarget) continue; // lake is past the target
+                let perp = Math.abs(-lx * sd + ly * cd); // sideways offset from path
+                if (perp < R && cDist < blockCDist) {
+                    blockCDist = cDist;
+                    block = lake;
+                }
+            }
+            if (!block) return desired; // clear path
+
+            // Steer along the tangent of the blocking lake, on the side that keeps
+            // us closest to the direction we actually want to go.
+            let lx = block.x - goblet.x, ly = block.y - goblet.y;
+            let cDist = Math.hypot(lx, ly) || 1;
+            let R = block.radius + GOBLET_SIZE / 2 + 4;
+            let angleToC = Math.atan2(ly, lx);
+            if (cDist > R) {
+                let alpha = Math.asin(Math.min(1, R / cDist));
+                let a1 = angleToC + alpha, a2 = angleToC - alpha;
+                return angleDiff(a1, desired) <= angleDiff(a2, desired) ? a1 : a2;
+            } else {
+                // Already at/inside the buffer ring: head straight along the tangent.
+                let a1 = angleToC + Math.PI / 2, a2 = angleToC - Math.PI / 2;
+                return angleDiff(a1, desired) <= angleDiff(a2, desired) ? a1 : a2;
+            }
+        }
+
         function moveGoblet(goblet, deltaTime) {
             if (goblet.isActing) {
                 goblet.vx = 0;
@@ -808,45 +907,44 @@
             }
 
             let speed = goblet.genes.speed;
+            // A thirsty goblet is allowed to walk into water to drink; everyone
+            // else treats lakes as solid obstacles.
+            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
 
-            // Desired velocity: straight toward the target (resource or roam point).
-            // Idle goblets have vx/vy set by wander(); just normalize those to speed.
+            // Desired velocity toward the target (resource/mate). When not seeking
+            // water, arc around any lake blocking the straight path.
             if (goblet.targetX !== null && goblet.targetY !== null) {
-                let dx = goblet.targetX - goblet.x;
-                let dy = goblet.targetY - goblet.y;
-                let dist = Math.hypot(dx, dy) || 1;
-                goblet.vx = (dx / dist) * speed;
-                goblet.vy = (dy / dist) * speed;
+                let heading;
+                if (avoidLakes) {
+                    heading = steerAroundLakes(goblet, goblet.targetX, goblet.targetY);
+                } else {
+                    heading = Math.atan2(goblet.targetY - goblet.y, goblet.targetX - goblet.x);
+                }
+                goblet.vx = Math.cos(heading) * speed;
+                goblet.vy = Math.sin(heading) * speed;
             } else {
+                // Wander: velocity already set by wander(); just normalize to speed.
                 let m = Math.hypot(goblet.vx, goblet.vy) || 1;
                 goblet.vx = (goblet.vx / m) * speed;
                 goblet.vy = (goblet.vy / m) * speed;
-            }
 
-            // Lakes are solid obstacles: steer AROUND them at full speed instead of
-            // stopping. A thirsty goblet is allowed to approach water so it can
-            // drink, so we only apply lake collision when it is NOT seeking water.
-            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
-            if (avoidLakes) {
-                for (let lake of lakes) {
-                    let dx = goblet.x - lake.x;
-                    let dy = goblet.y - lake.y;
-                    let d = Math.hypot(dx, dy) || 1;
-                    let minDist = lake.radius + GOBLET_SIZE / 2;
-                    if (d < minDist + 6) {
-                        let nx = dx / d, ny = dy / d;                 // outward normal
-                        let vDotN = goblet.vx * nx + goblet.vy * ny;
-                        if (vDotN < 0) {
-                            // Heading into the lake: redirect to a full-speed tangent
-                            // (circle the edge). Pick the go-around side that matches
-                            // current heading, deterministically, so it never jitters.
-                            let sp = Math.hypot(goblet.vx, goblet.vy) || speed;
-                            let tx = -ny, ty = nx;                     // one tangent
-                            if (goblet.vx * tx + goblet.vy * ty < 0) { // pick aligned side
-                                tx = ny; ty = -nx;
+                // Safety tangent-slide if a wander heading still grazes a lake.
+                if (avoidLakes) {
+                    for (let lake of lakes) {
+                        let dx = goblet.x - lake.x;
+                        let dy = goblet.y - lake.y;
+                        let d = Math.hypot(dx, dy) || 1;
+                        let minDist = lake.radius + GOBLET_SIZE / 2;
+                        if (d < minDist + 6) {
+                            let nx = dx / d, ny = dy / d;
+                            let vDotN = goblet.vx * nx + goblet.vy * ny;
+                            if (vDotN < 0) {
+                                let sp = Math.hypot(goblet.vx, goblet.vy) || speed;
+                                let tx = -ny, ty = nx;
+                                if (goblet.vx * tx + goblet.vy * ty < 0) { tx = ny; ty = -nx; }
+                                goblet.vx = tx * sp;
+                                goblet.vy = ty * sp;
                             }
-                            goblet.vx = tx * sp;
-                            goblet.vy = ty * sp;
                         }
                     }
                 }
@@ -1164,6 +1262,8 @@
             document.getElementById('insGen').textContent = g.generation;
             document.getElementById('insGender').textContent =
                 g.gender === 'female' ? '♀ female' : '♂ male';
+            document.getElementById('insAge').textContent =
+                g.age.toFixed(0) + 's' + (g.age >= REPRO_MAX_AGE ? ' (infertile)' : '');
             document.getElementById('insStatus').textContent =
                 g.isActing ? 'busy' : (g.state === 'seekingWater' ? 'thirsty' :
                 g.state === 'seekingFood' ? 'hungry' : 'idle');
@@ -1175,6 +1275,7 @@
             document.getElementById('insSize').textContent = g.genes.size.toFixed(1);
             document.getElementById('insCurSize').textContent = g.currentSize.toFixed(1) +
                 (g.isGrown ? '' : ' (growing)');
+            document.getElementById('insScore').textContent = geneQuality(g).toFixed(2);
         }
 
         document.getElementById('inspectorClose').addEventListener('click', () => {
