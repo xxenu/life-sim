@@ -769,7 +769,12 @@
         }
 
         function wander(goblet, deltaTime) {
-            let isUrgent = goblet.state === 'seekingFood' || goblet.state === 'seekingWater';
+            // Goblets are NEVER allowed to stand still when they have something to
+            // pursue: food/water when hungry/thirsty, OR a partner when they are
+            // eligible to breed. In all these cases they keep moving to search.
+            let isUrgent = goblet.state === 'seekingFood' || goblet.state === 'seekingWater' ||
+                           goblet.hunger < HUNGER_THRESHOLD || goblet.thirst < THIRST_THRESHOLD ||
+                           canReproduce(goblet);
 
             // Cancel any rest if hungry/thirsty — constant search
             if (isUrgent) {
