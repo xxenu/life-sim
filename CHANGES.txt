@@ -1,0 +1,456 @@
+GOBLET LIFE SIMULATION - CHANGES LOG
+====================================
+
+[2026-07-10] REVERT SEARCH TO HEADING-BASED WANDER (known good)
+================================================================
+Per request, reverted the movement/search to the version that worked
+properly (no git history exists, so this is a manual restore of the
+old behavior — all other features kept).
+
+✓ Removed the "walk to a random point" roam system entirely
+  (roamToward / pickRoamPoint), which was the source of the
+  center-clumping drift.
+✓ seekingWater / seekingFood with nothing in sight now use the simple
+  heading-based wander() again: pick a heading, walk straight, turn a
+  little every ~2s. When a lake/bush enters sight range the goblet
+  walks straight to it. Idle also wanders.
+✓ Kept: lake sliding + bounds clamp in moveGoblet, and everything
+  else (genes, reproduction, colors, metabolism, speed controls,
+  assets). Cleaned up leftover roamTarget resets.
+
+================================================================
+
+[2026-07-10] REAL FIX: CENTER-CLUMP / SHAKING (roam re-aim bias)
+================================================================
+CONFIRMED by watching it run: by ~34s all 15 goblets collapsed into a
+jittering clump at the exact map centre (500,350), pop still 15
+(nobody ate/drank/reproduced) — they were being *dragged* inward.
+
+ROOT CAUSE: roamToward() re-picked a fresh UNIFORM-RANDOM destination
+every 4 seconds (the anti-stuck timer). A goblet rarely reaches a far
+point in 4s, so it was constantly re-aiming at a new random point from
+wherever it stood. The average direction toward a uniform-random point
+in the rectangle is toward the rectangle's CENTROID = map centre, so
+the whole population drifted to the middle and jittered there.
+
+FIX: goblets now COMMIT to each random destination until they actually
+arrive (uniform coverage, no centre bias). Re-pick happens only on:
+  - arrival (within 25px), or
+  - being genuinely blocked: no progress (distance-to-target not
+    shrinking) for 2.5s — detected via roamBestDist / roamProgressTime.
+Removed the fixed 4s timer (roamExpire) entirely. The lake-block case
+is still handled, now without the centre-drift side effect.
+
+================================================================
+
+[2026-07-10] FIX: SHAKING / CLUSTERING AT LAKE EDGES
+================================================================
+PROBLEM: ~25-30s in, goblets started shaking and drifting toward the
+middle.
+CAUSE: the tangential slide "remove inward velocity component" trick
+zeroes out almost ALL velocity when the target sits directly behind a
+lake (desired direction == inward normal). Goblets froze and jittered
+at the lake edge with near-zero speed. Since the two lakes are at
+opposite corners, goblets stuck on their inner edges piled up along
+the center diagonal -> looked like "moving to the middle."
+
+FIX:
+✓ Instead of deleting the inward component (which can cancel the whole
+  velocity), a goblet heading into a lake is now redirected to a
+  FULL-SPEED TANGENT so it circles the edge and keeps moving.
+✓ The go-around side is chosen deterministically (the tangent aligned
+  with current heading), so it commits to one direction and never
+  flip-flops -> no more shaking.
+✓ Hard push-out and bounds clamp unchanged.
+
+================================================================
+
+[2026-07-10] PATHFINDING FIX (no more center-clustering / starving)
+================================================================
+PROBLEM: goblets grouped in the middle and got stuck until they died.
+CAUSES (in the old ray-based avoidance):
+  - World EDGES were treated as obstacles, so goblets were constantly
+    reflected inward -> everyone drifted to the center, away from the
+    edge/corner bushes & lakes, and starved.
+  - When a roam point sat behind a lake, the goblet oscillated at the
+    lake edge, never got within 25px to pick a new point, and never
+    reached the resource -> stuck forever.
+  - Stuck-recovery only nudged wanderAngle, which roaming ignores, so
+    roaming goblets could never break out.
+
+FIX:
+✓ Removed isObstacleAhead() / getAvoidanceDirection() entirely.
+✓ moveGoblet() now walks straight to the target and handles lakes with
+  TANGENTIAL SLIDING: the velocity component pointing into a lake is
+  removed, so goblets smoothly slide around the edge instead of
+  stopping or oscillating. A hard push-out guarantees they never end
+  up inside a lake. No edge avoidance — bounds are just clamped, so
+  the whole map (including edge resources) is reachable again.
+✓ Lake collision is skipped while a goblet is thirsty, so it can walk
+  up to the water and drink (drinking triggers at the lake edge).
+✓ roamToward() now re-picks its random point when reached OR after a
+  4-second timeout (roamExpire), so a blocked goblet can never orbit a
+  lake forever — hungry/thirsty goblets keep walking until they find
+  a resource. pickRoamPoint() also avoids choosing points inside lakes.
+
+================================================================
+
+[2026-07-10] HEAVY-TAILED GENETIC DEVIATION
+================================================================
+WHAT: inheritance deviation changed from a flat uniform range to a
+heavy-tailed distribution — usually kids resemble both parents, but
+rarely a goblet is born radically different; the more extreme the
+mutation, the rarer it is.
+
+HOW:
+✓ Added gaussianRandom() (Box-Muller standard normal): small
+  deviations common, large ones increasingly rare by nature.
+✓ Added deviation(amount): Gaussian core (amount ≈ 1 std dev) PLUS a
+  rare "macro-mutation" (MACRO_MUTATION_CHANCE = 4%) that multiplies
+  the deviation by ~4-10x (itself Gaussian-weighted, so bigger jumps
+  are rarer). Result: mostly small, occasionally extreme, unbounded.
+✓ inheritGenes() now uses deviation() for sight, speed, size AND all
+  three color channels — so a rare mutant can look totally different
+  in stats or color, not just drift slightly.
+✓ Replaced the old uniform "(random*2-1)*amount" everywhere in
+  inheritance. (Starting spawns unchanged.)
+
+TUNING: raise MACRO_MUTATION_CHANCE for more frequent extremes, or
+the per-stat `amount` values for a wider everyday spread.
+
+================================================================
+
+[2026-07-10] REMOVED EVOLUTIONARY LIMITS
+================================================================
+✓ inheritGenes() no longer clamps sight/speed/size to fixed ranges.
+  Inherited traits now drift freely each generation (average of
+  parents +- deviation), with only a floor of 1 so a gene can't go
+  zero/negative and break movement/sight/rendering.
+✓ Removed now-unused SIGHT_MIN/MAX and SPEED_MIN/MAX constants.
+✓ Kept ADULT_SIZE_MIN/MAX (18-30) — but ONLY as the starting-
+  population spawn range in createGenes(); it no longer limits
+  evolved size.
+✓ Color channels still clamp 0-255 (that's the valid RGB range,
+  a rendering requirement, not an evolutionary limit).
+
+================================================================
+
+[2026-07-10] SEARCH BEHAVIOR + MATE-ON-SIGHT
+================================================================
+SEARCH (matches the video's described logic):
+✓ When hungry/thirsty, a goblet first checks its sight radius for a
+  resource. If one is in sight -> commit to walking straight to it.
+✓ If nothing is in sight, it now PICKS A RANDOM POINT and walks
+  toward it (roamToward()), choosing a new random point once reached,
+  and re-checking its sight radius every tick. As soon as a resource
+  comes into range, it overrides the random point and heads for it.
+  (Previously it just jittered in place via wander().)
+✓ roamTarget cleared when entering a seeking state and when a
+  resource is found, so each search starts fresh.
+✓ Idle (not hungry/thirsty) still uses gentle wander().
+
+MATING:
+✓ Reworked so mating triggers whenever an eligible mate is in range,
+  regardless of what the goblet was doing. The mating check now runs
+  every tick (gated by canReproduce) instead of only in the idle
+  branch of the state machine.
+✓ Mate range = the goblet's own sight range (genes.sightRange),
+  so better-sighted goblets can find mates from farther away.
+
+================================================================
+
+[2026-07-10] SIMULATION SPEED CONTROLS
+================================================================
+✓ Added a button bar (bottom center): 1x 2x 4x 6x 10x 20x 100x.
+  Active speed is highlighted; current speed also shown in the
+  top-left info panel.
+✓ Reworked the main loop to advance the sim by realDelta * simSpeed,
+  broken into fixed sub-steps (FIXED_DT = 1/60) for stable physics
+  at high speed. 1x stays real-time regardless of frame rate.
+  MAX_STEPS_PER_FRAME=200 safety cap so the tab can't lock up.
+✓ Converted wall-clock timers to sim-time (gameTime) so they scale
+  with sim speed — otherwise food/wander wouldn't speed up:
+    - Apple regrow now uses gameTime + APPLE_REGROW_SECONDS (5s).
+    - Bush regrow reset on eating uses gameTime.
+    - Wander direction-change timer uses gameTime (2s).
+    - All lastWanderChange / lastRegrow init values use gameTime.
+  Removed all Date.now() usage from the sim.
+✓ Fixed pre-existing time-display bug: "Time" showed gameTime/1000
+  (gameTime is already seconds) -> now shows gameTime directly.
+
+================================================================
+
+[2026-07-10] METABOLISM COST (SPEED + SIZE -> HUNGRIER)
+================================================================
+WHY: gives speed/size a survival trade-off (the video's energy cost)
+so evolution doesn't run away to max stats for free.
+
+CHANGES:
+✓ Added metabolism(g) = (speed/SPEED_REF)*0.6 + (currentSize/SIZE_REF)*0.4
+  Reference points SPEED_REF=55, SIZE_REF=24 → an average starting
+  goblet has multiplier ~1.0.
+✓ Hunger now decays at HUNGER_DECAY_RATE * metabolism(goblet):
+  faster goblets AND bigger goblets get hungry quicker. Uses CURRENT
+  size, so small juveniles are cheap to feed and cost rises as they grow.
+✓ Applied to both normal decay and the reduced decay while eating/
+  drinking/mating.
+✓ Thirst left on the flat rate for now (say the word to make speed
+  cost thirst too, like the video).
+
+================================================================
+
+[2026-07-10] COLOR NOW BLENDS (PURPLE BABIES)
+================================================================
+WHY: color wasn't being averaged — it was a discrete red/blue gene
+that inherited from ONE parent at random, so red x blue never made
+purple. (Sight/speed/size WERE already averaging correctly.)
+
+CHANGES:
+✓ Color gene is now continuous RGB instead of the string 'red'/'blue'.
+  - createGenes(): starting goblets are pure red {220,30,30} or
+    pure blue {30,60,220}.
+  - inheritGenes(): each RGB channel = average of both parents +-20,
+    so a red x blue pairing yields purple (with variation toward
+    either parent), and mixed goblets blend further over generations.
+✓ Skin tinting is now dynamic: getTintedSkin(color) tints the
+  human-skin silhouette to any RGB and caches the result per color
+  (keyed by rounded r,g,b) so each shade is only rendered once.
+✓ Removed the fixed skinRed/skinBlue prebuild (buildTintedSkins).
+
+================================================================
+
+[2026-07-10] BACK TO 2 BUSHES + 2 LAKES
+================================================================
+✓ setupWorld() reverted to exactly 2 bushes and 2 lakes
+  (removed the 3rd bush at 500,350 and 3rd lake at 450,600).
+
+================================================================
+
+[2026-07-10] EAT/DRINK ONLY WHEN NEEDED
+================================================================
+✓ Goblets no longer consume apples / drink just by touching a
+  bush or lake. checkBushInteraction now only fires when the
+  goblet is in 'seekingFood' state (i.e. actually hungry), and
+  checkLakeInteraction only when 'seekingWater' (actually thirsty).
+✓ Result: a full goblet walks right past bushes/lakes without
+  wasting apples. One feeding replenishes it (hunger/thirst ->100),
+  state returns to idle, and it wanders off until hungry/thirsty
+  again. (Juveniles still grow, but only while eating when hungry.)
+
+================================================================
+
+[2026-07-10] START STATS + MATING PAUSE + WALK BOB
+================================================================
+✓ Starting population now spawns with 50% hunger and 50% thirst
+  (was 100%). Applies to both spawnGoblet() and the setupWorld
+  fallback. Newborns are still born full (100) since they come
+  from well-fed parents.
+✓ Mating is now a "stand still" action like eating/drinking:
+  both parents set isActing for MATE_DURATION (1s), velocity zeroed,
+  so they pause for a second when a child is produced.
+✓ Added a simple walking bob: while a goblet is moving, its sprite
+  hops up/down via abs(sin(gameTime * freq + phase)). Frequency
+  scales with the goblet's speed gene; amplitude scales with size.
+  Each goblet has a random bobPhase so they don't bob in sync.
+  Status bars stay fixed (only the sprite bobs) to avoid jitter.
+
+================================================================
+
+[2026-07-10] REPRODUCTION + GROWTH FIX
+================================================================
+BUGS FIXED:
+✓ createGenes() never set maxSize → initial goblets had
+  genes.maxSize = undefined, so "currentSize >= maxSize*2" was
+  always NaN/false. Result: NO goblet ever became adult and NONE
+  could reproduce. Reworked so genes.size IS the genetic adult size.
+✓ Removed the confusing "* 2" size scaling everywhere (spawn, grow,
+  grown-check, render all used inconsistent units).
+✓ inheritGenes() deviation clamp was [60,150] (written for sight)
+  but applied to ALL genes — would have forced speed/size to >=60.
+  Now each gene has its own deviation amount + sensible clamp.
+
+GENETICS (as requested):
+✓ Child inherits the AVERAGE of both parents' genes, then a slight
+  deviation in either direction:
+    - sightRange: avg ± 8   (clamp 40-200)
+    - speed:      avg ± 5    (clamp 15-120)
+    - size:       avg ± 3    (adult size)
+  Color is inherited from one parent at random (red/blue only).
+
+GROWTH:
+✓ Children spawn at a random size between 6 and 10 (MIN/MAX_CHILD_SIZE).
+✓ Goblets grow by eating: +2-4 size per meal, up to their genetic
+  adult size (genes.size), then isGrown = true.
+✓ Starting population spawns already fully grown (currentSize =
+  genes.size, isGrown = true) so the sim can bootstrap.
+✓ Juveniles show a gold growth-progress bar; removed old ring/crown.
+
+REPRODUCTION RULES:
+✓ Only FULLY GROWN goblets can reproduce (isGrown).
+✓ Both partners need hunger >= 90 AND thirst >= 90 (REPRODUCTION_THRESHOLD).
+✓ Added canReproduce() helper used by both the update loop and findMate.
+✓ Reproduction costs each parent 30 hunger + 30 thirst.
+✓ Added REPRO_COOLDOWN (6s) so a goblet can't mate every frame; both
+  parents go on cooldown after mating (prevents instant population blowup).
+✓ Child spawns between the two parents, nudged out of lakes/bounds.
+
+================================================================
+
+[2026-07-10] FULLSCREEN CANVAS
+================================================================
+✓ Canvas now fills the entire browser window (100vw x 100vh)
+✓ html/body set to margin 0, overflow hidden; removed border/padding
+✓ Removed fixed width/height attrs from <canvas>; sized via JS
+✓ Added resizeCanvas() on window 'resize' → canvas matches window
+✓ Separated concepts: WORLD_WIDTH/WORLD_HEIGHT (1000x700 sim bounds)
+  vs canvas.width/height (screen). Renamed old CANVAS_* constants to
+  WORLD_* (spawn bounds, movement clamp, world background rect)
+✓ Full-screen clear now uses canvas.width/height
+✓ Added centerCamera() to center the 1000x700 world in the viewport
+  on load; camera pan/zoom still works over the full window
+
+================================================================
+
+[2026-07-10] HUNGER TUNING + CAMERA CONTROLS
+================================================================
+BALANCE:
+✓ HUNGER_DECAY_RATE lowered a lot: 8 → 1.5 per second
+  (goblets now get hungry much more slowly; thirst unchanged at 10/s)
+
+CAMERA (zoom + pan):
+✓ Added camera state {x, y, zoom} with zoom clamp 0.5x–6x
+✓ Scrollwheel zooms toward the mouse cursor (anchored zoom)
+✓ Click-drag pans the view around the world
+✓ render() now clears in screen space, then applies
+  ctx.setTransform(zoom,0,0,zoom,x,y) so all world drawing is
+  transformed by the camera
+✓ Cursor shows grab / grabbing feedback
+✓ Mouse coords account for CSS scaling of the canvas
+
+================================================================
+
+[2026-07-10] ASSET INTEGRATION + BERRY PLACEMENT
+================================================================
+ASSETS:
+✓ Loaded PNG assets from assets/ folder via preloader (Promise-based)
+  - bush.png     → bushes (BUSH_SIZE = 60px sprite)
+  - berry.png    → berries on bushes (BERRY_SIZE = 16px sprite)
+  - human-outline.png + human-skin.png → goblets (GOBLET_SIZE = 24px)
+✓ Goblets now render as human sprite: color gene tints the skin layer
+  (multiply blend) with the black outline drawn on top
+✓ Removed old procedural circle/eye drawing for goblets
+✓ Collision/spawn/edge radii switched from GOBLET_RADIUS to GOBLET_SIZE/2
+✓ Bush interaction radius now uses BUSH_SIZE/2
+
+BERRY PLACEMENT (per reference image):
+✓ Replaced ring/circle berry layout with 3 fixed slots inside the bush:
+  - Slot 1: left-middle   (dx -0.22, dy  0.06)
+  - Slot 2: upper-right   (dx  0.14, dy -0.10)
+  - Slot 3: lower-right   (dx  0.11, dy  0.24)
+  (offsets are fractions of BUSH_SIZE from bush center)
+✓ Max 3 berries per bush retained; berries fill slots 1→3 as they regrow
+
+================================================================
+
+[2026-07-10] INITIAL BUILD - Core Prototype Complete
+================================================================
+
+WORLD SETUP:
+✓ Created 1000x700 canvas with dark background
+✓ Implemented 2 bushes (green circles @ x:250,y:200 and x:750,y:500)
+  - Each bush: radius 30px, max 3 apples
+  - Apples regrow one per 5 seconds
+  - Apples rendered as small red dots positioned around bush
+✓ Implemented 2 lakes (blue circles @ x:150,y:550 and x:850,y:150)
+  - Each lake: radius 60px, acts as solid obstacle
+  - Goblets path around edges, cannot swim through
+
+GOBLET MECHANICS:
+✓ Spawned 15 goblets at random positions (not in lakes)
+✓ Each goblet has:
+  - Position (x, y)
+  - Hunger: 0-100, starts at 100, decays 8 per second
+  - Thirst: 0-100, starts at 100, decays 10 per second
+  - Three genes (randomized per goblet):
+    • Color: random hue (0-360)
+    • Sight Range: 80-120px radius
+    • Speed: 40-70 px/second
+  - State: idle | seekingFood | seekingWater
+  - Velocity tracking for movement
+
+STATE MACHINE:
+✓ Thirst threshold: 40 (triggers seekingWater)
+✓ Hunger threshold: 40 (triggers seekingFood)
+✓ Priority: thirst > hunger > idle
+✓ Continuous decay system per frame
+✓ Automatic state transitions based on need levels
+
+SEEKING BEHAVIOR:
+✓ Sight range checking: goblets only target resources within sightRange
+✓ Target acquisition: scans all lakes/bushes each frame
+✓ Wandering fallback: random direction changes when no target in sight
+✓ Movement toward target: direct linear movement at goblet's speed
+✓ Wander: periodic angle changes every 2 seconds with smooth drifting
+
+INTERACTIONS:
+✓ Lake touching:
+  - Thirst instantly set to 100
+  - State returns to idle
+  - Goblet pushed away from lake center if overlapping
+✓ Bush touching (with apples):
+  - Consumes 1 apple (bush count -1)
+  - Hunger increases by 33 (capped at 100)
+  - State returns to idle
+  - Resets apple regrow timer
+✓ Empty bush: goblet continues wandering, re-scans sight range
+
+DEATH SYSTEM:
+✓ Hunger <= 0: goblet removed from simulation
+✓ Thirst <= 0: goblet removed from simulation
+✓ Array cleanup on removal
+
+OBSTACLE AVOIDANCE:
+✓ Lakes act as solid obstacles
+✓ Goblets cannot enter lakes
+✓ Simple edge-pushing: if path intersects lake, goblet pushed tangentially away
+✓ Canvas boundary clamping: goblets stay within 1000x700 bounds
+
+RENDERING:
+✓ Lakes: blue filled circles (#2563eb)
+✓ Bushes: green filled circles (#22c55e) with red apple dots
+✓ Goblets: small colored circles (6px radius) using HSL color from gene
+✓ Eyes: two tiny black dots for personality/face
+✓ Debug bars above each goblet:
+  - Red bar: hunger level (0-100)
+  - Blue bar: thirst level (0-100)
+  - Size: 12px wide × 2px tall, positioned 8px above goblet
+✓ UI overlay (top-left):
+  - Population counter (live count)
+  - Game time in seconds
+
+PERFORMANCE:
+✓ 60 FPS target via requestAnimationFrame
+✓ Delta-time based updates for frame-rate independence
+✓ Efficient collision detection (distance checks only)
+✓ No external dependencies - pure vanilla JS
+
+CODE ORGANIZATION:
+✓ CONSTANTS section: tunable gameplay parameters
+✓ WORLD STATE: canvas, goblets array, bushes array, lakes array, game time
+✓ WORLD SETUP: setupWorld(), spawnGoblet()
+✓ UPDATE LOOP: update(), updateGobletBehavior(), wander(), moveGoblet()
+✓ INTERACTIONS: checkLakeInteraction(), checkBushInteraction()
+✓ RENDERING: render()
+✓ MAIN LOOP: gameLoop() with deltaTime tracking
+
+NOTES:
+- No reproduction system yet (future version)
+- No predators (future version)
+- No mutation/genetics inheritance (future version)
+- Simple wander: random angle changes, no pathfinding
+- Lake avoidance is simple edge-pushing, not sophisticated pathfinding
+- All values tuned for 15-goblet population with current world size
+
+================================================================
+Ready for testing and iteration!
+================================================================
