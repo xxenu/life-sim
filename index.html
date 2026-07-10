@@ -155,8 +155,8 @@
         // ============================================================================
         // CONSTANTS
         // ============================================================================
-        const WORLD_WIDTH = 1000;
-        const WORLD_HEIGHT = 700;
+        const WORLD_WIDTH = 1700;
+        const WORLD_HEIGHT = 1300;
         const HUNGER_DECAY_RATE = 0.55;
         const THIRST_DECAY_RATE = 0.4;
         const HUNGER_THRESHOLD = 40;
@@ -198,7 +198,15 @@
         let ctx = canvas.getContext('2d');
         let goblets = [];
         let bushes = [];
+        let growingBushes = [];
+        let pendingPoops = [];
         let lakes = [];
+        const POOP_DELAY = 50;
+        const POOP_SPROUT_CHANCE = 0.2;
+        const BUSH_STAGE_DURATION = 150;
+        const BUSH_STAGES = ['poop', 'bush1', 'bush2', 'bush3', 'bush4'];
+        const POOP_SIZE = 20;
+        const GROWING_BUSH_SIZES = { poop: 20, bush1: 25, bush2: 35, bush3: 45, bush4: 60 };
         let gameTime = 0;
         let nextGobletId = 1;
         let selectedGobletId = null;
@@ -250,9 +258,9 @@
             return Promise.all([
                 new Promise(resolve => {
                     assets.bush = new Image();
-                    assets.bush.src = 'assets/bush.png';
+                    assets.bush.src = 'assets/bush4.png';
                     assets.bush.onload = resolve;
-                    assets.bush.onerror = () => { console.warn('bush.png not found'); resolve(); };
+                    assets.bush.onerror = () => { console.warn('bush4.png not found'); resolve(); };
                 }),
                 new Promise(resolve => {
                     assets.berry = new Image();
@@ -292,6 +300,36 @@
                         assets.humanSkin = c;
                         resolve();
                     };
+                }),
+                new Promise(resolve => {
+                    assets.hearts = new Image();
+                    assets.hearts.src = 'assets/hearts.png';
+                    assets.hearts.onload = resolve;
+                    assets.hearts.onerror = () => { console.warn('hearts.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.poop = new Image();
+                    assets.poop.src = 'assets/poop.png';
+                    assets.poop.onload = resolve;
+                    assets.poop.onerror = () => { console.warn('poop.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.bush1 = new Image();
+                    assets.bush1.src = 'assets/bush1.png';
+                    assets.bush1.onload = resolve;
+                    assets.bush1.onerror = () => { console.warn('bush1.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.bush2 = new Image();
+                    assets.bush2.src = 'assets/bush2.png';
+                    assets.bush2.onload = resolve;
+                    assets.bush2.onerror = () => { console.warn('bush2.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.bush3 = new Image();
+                    assets.bush3.src = 'assets/bush3.png';
+                    assets.bush3.onload = resolve;
+                    assets.bush3.onerror = () => { console.warn('bush3.png not found'); resolve(); };
                 })
             ]);
         }
@@ -372,16 +410,36 @@
         // ============================================================================
         // WORLD SETUP
         // ============================================================================
-        function setupWorld() {
-            bushes = [
-                { x: 250, y: 200, radius: 30, apples: 3, lastRegrow: 0 },
-                { x: 750, y: 500, radius: 30, apples: 3, lastRegrow: 0 }
-            ];
+        function spawnSpread(count, padding, minDist, existing) {
+            let points = [];
+            for (let i = 0; i < count; i++) {
+                let best = null, bestScore = -1;
+                for (let attempt = 0; attempt < 200; attempt++) {
+                    let x = padding + Math.random() * (WORLD_WIDTH - padding * 2);
+                    let y = padding + Math.random() * (WORLD_HEIGHT - padding * 2);
+                    let nearest = Infinity;
+                    for (let p of points) nearest = Math.min(nearest, Math.hypot(x - p.x, y - p.y));
+                    for (let p of existing) nearest = Math.min(nearest, Math.hypot(x - p.x, y - p.y));
+                    if (nearest >= minDist && nearest > bestScore) {
+                        best = { x, y };
+                        bestScore = nearest;
+                    }
+                }
+                if (!best) {
+                    best = { x: padding + Math.random() * (WORLD_WIDTH - padding * 2), y: padding + Math.random() * (WORLD_HEIGHT - padding * 2) };
+                }
+                points.push(best);
+            }
+            return points;
+        }
 
-            lakes = [
-                { x: 150, y: 550, radius: 60 },
-                { x: 850, y: 150, radius: 60 }
-            ];
+        function setupWorld() {
+            let lakeCount = 3 + Math.floor(Math.random() * 4);
+            let lakePoints = spawnSpread(lakeCount, 80, 150, []);
+            lakes = lakePoints.map(p => ({ x: p.x, y: p.y, radius: 50 + Math.random() * 20 }));
+
+            let bushPoints = spawnSpread(6, 60, 120, lakes);
+            bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0 }));
 
             for (let i = 0; i < 8; i++) spawnGoblet('male');
             for (let i = 0; i < 8; i++) spawnGoblet('female');
@@ -434,7 +492,8 @@
                 baseSpeed: genes.speed,
                 // Track last few positions to detect true stuckness
                 posHistory: [],
-                stuckFrames: 0
+                stuckFrames: 0,
+                berriesEaten: 0
             };
             goblets.push(goblet);
             return goblet;
@@ -489,9 +548,11 @@
             goblet2.reproCooldown = REPRO_COOLDOWN;
 
             goblet1.isActing = true;
+            goblet1.isMating = true;
             goblet1.actionTimer = MATE_DURATION;
             goblet1.vx = 0; goblet1.vy = 0;
             goblet2.isActing = true;
+            goblet2.isMating = true;
             goblet2.actionTimer = MATE_DURATION;
             goblet2.vx = 0; goblet2.vy = 0;
 
@@ -554,7 +615,8 @@
                 baseSightRange: childGenes.sightRange,
                 baseSpeed: childGenes.speed,
                 posHistory: [],
-                stuckFrames: 0
+                stuckFrames: 0,
+                berriesEaten: 0
             };
 
             goblets.push(child);
@@ -696,6 +758,7 @@
                     goblet.actionTimer -= deltaTime;
                     if (goblet.actionTimer <= 0) {
                         goblet.isActing = false;
+                        goblet.isMating = false;
                         goblet.state = 'idle';
                         goblet.targetX = null;
                         goblet.targetY = null;
@@ -739,8 +802,26 @@
                 if (canReproduce(goblet)) {
                     let mate = findMate(goblet);
                     if (mate) {
-                        reproduce(goblet, mate);
-                        continue;
+                        goblet.state = 'seekingMate';
+                        goblet.mateTarget = mate;
+                        mate.state = 'seekingMate';
+                        mate.mateTarget = goblet;
+                    }
+                }
+
+                if (goblet.state === 'seekingMate') {
+                    let mt = goblet.mateTarget;
+                    if (!mt || !goblets.includes(mt) || !canReproduce(goblet) || !canReproduce(mt)) {
+                        goblet.state = 'idle';
+                        goblet.mateTarget = null;
+                        goblet.targetX = null;
+                        goblet.targetY = null;
+                    } else {
+                        let dist = Math.hypot(goblet.x - mt.x, goblet.y - mt.y);
+                        if (dist < GOBLET_SIZE * 1.5) {
+                            reproduce(goblet, mt);
+                            continue;
+                        }
                     }
                 }
 
@@ -748,11 +829,13 @@
                     goblet.state = 'seekingWater';
                     goblet.targetX = null;
                     goblet.targetY = null;
+                    goblet.mateTarget = null;
                 } else if (goblet.hunger < HUNGER_THRESHOLD && goblet.state !== 'seekingFood') {
                     goblet.state = 'seekingFood';
                     goblet.targetX = null;
                     goblet.targetY = null;
-                } else if (goblet.hunger >= HUNGER_THRESHOLD && goblet.thirst >= THIRST_THRESHOLD) {
+                    goblet.mateTarget = null;
+                } else if (goblet.hunger >= HUNGER_THRESHOLD && goblet.thirst >= THIRST_THRESHOLD && goblet.state !== 'seekingMate') {
                     goblet.state = 'idle';
                     goblet.targetX = null;
                     goblet.targetY = null;
@@ -770,6 +853,43 @@
                     bush.lastRegrow = gameTime;
                 }
             }
+
+            for (let i = pendingPoops.length - 1; i >= 0; i--) {
+                let pp = pendingPoops[i];
+                if (gameTime >= pp.dropTime) {
+                    let g = pp.goblet;
+                    let px, py;
+                    if (goblets.includes(g)) {
+                        let poopAngle = Math.random() * Math.PI * 2;
+                        px = g.x + Math.cos(poopAngle) * GOBLET_SIZE;
+                        py = g.y + Math.sin(poopAngle) * GOBLET_SIZE;
+                    } else {
+                        px = Math.random() * (WORLD_WIDTH - 40) + 20;
+                        py = Math.random() * (WORLD_HEIGHT - 40) + 20;
+                    }
+                    px = Math.max(20, Math.min(WORLD_WIDTH - 20, px));
+                    py = Math.max(20, Math.min(WORLD_HEIGHT - 20, py));
+                    let willSprout = Math.random() < POOP_SPROUT_CHANCE;
+                    growingBushes.push({ x: px, y: py, stage: 0, stageTime: gameTime, willSprout: willSprout });
+                    pendingPoops.splice(i, 1);
+                }
+            }
+
+            for (let i = growingBushes.length - 1; i >= 0; i--) {
+                let gb = growingBushes[i];
+                if (gameTime - gb.stageTime >= BUSH_STAGE_DURATION) {
+                    if (gb.stage === 0 && !gb.willSprout) {
+                        growingBushes.splice(i, 1);
+                        continue;
+                    }
+                    gb.stage++;
+                    gb.stageTime = gameTime;
+                    if (gb.stage >= BUSH_STAGES.length - 1) {
+                        bushes.push({ x: gb.x, y: gb.y, radius: 30, apples: 0, lastRegrow: gameTime });
+                        growingBushes.splice(i, 1);
+                    }
+                }
+            }
         }
 
         function updateGobletBehavior(goblet, deltaTime) {
@@ -779,6 +899,11 @@
                 seekResource(goblet, deltaTime, 'water');
             } else if (goblet.state === 'seekingFood') {
                 seekResource(goblet, deltaTime, 'food');
+            } else if (goblet.state === 'seekingMate' && goblet.mateTarget) {
+                goblet.targetX = goblet.mateTarget.x;
+                goblet.targetY = goblet.mateTarget.y;
+                goblet.commitX = null;
+                goblet.commitY = null;
             } else {
                 goblet.commitX = null;
                 goblet.commitY = null;
@@ -835,7 +960,7 @@
 
         function wander(goblet, deltaTime) {
             let isUrgent = goblet.state === 'seekingFood' || goblet.state === 'seekingWater' ||
-                           goblet.hunger < HUNGER_THRESHOLD || goblet.thirst < THIRST_THRESHOLD ||
+                           goblet.hunger < 50 || goblet.thirst < 50 ||
                            canReproduce(goblet);
 
             if (isUrgent) {
@@ -977,6 +1102,11 @@
                 if (dist < BUSH_SIZE / 2 + GOBLET_SIZE / 2 && bush.apples > 0) {
                     bush.apples--;
                     goblet.hunger = 100;
+                    goblet.berriesEaten++;
+                    if (goblet.berriesEaten >= 3) {
+                        goblet.berriesEaten = 0;
+                        pendingPoops.push({ goblet: goblet, dropTime: gameTime + POOP_DELAY });
+                    }
 
                     if (!goblet.isGrown) {
                         let range = goblet.genes.size - goblet.birthSize;
@@ -1038,6 +1168,16 @@
                         ctx.drawImage(assets.berry, berryX - BERRY_SIZE / 2, berryY - BERRY_SIZE / 2, BERRY_SIZE, BERRY_SIZE);
                     }
                     ctx.restore();
+                }
+            }
+
+            // Draw growing bushes / poop
+            for (let gb of growingBushes) {
+                let stageName = BUSH_STAGES[gb.stage];
+                let img = assets[stageName];
+                let sz = GROWING_BUSH_SIZES[stageName] || 30;
+                if (img) {
+                    ctx.drawImage(img, gb.x - sz / 2, gb.y - sz / 2, sz, sz);
                 }
             }
 
@@ -1190,11 +1330,9 @@
                 ctx.fillStyle = '#2563eb';
                 ctx.fillRect(barX, barY + 3, (goblet.thirst / 100) * barWidth, barHeight);
                 
-                if (goblet.isActing) {
-                    ctx.fillStyle = '#fbbf24';
-                    ctx.beginPath();
-                    ctx.arc(goblet.x, goblet.y - size/2 - 20, 5, 0, Math.PI * 2);
-                    ctx.fill();
+                if (goblet.isActing && goblet.isMating && assets.hearts) {
+                    let hSize = 20;
+                    ctx.drawImage(assets.hearts, goblet.x - hSize / 2, goblet.y - size / 2 - hSize - 4, hSize, hSize);
                 }
             }
 
@@ -1287,8 +1425,8 @@
             document.getElementById('insAge').textContent =
                 g.age.toFixed(0) + 's' + (g.age >= REPRO_MAX_AGE ? ' (infertile)' : '');
             document.getElementById('insStatus').textContent =
-                g.isActing ? 'busy' : (g.state === 'seekingWater' ? 'thirsty' :
-                g.state === 'seekingFood' ? 'hungry' : 'idle');
+                g.isMating ? 'mating' : g.isActing ? 'busy' : (g.state === 'seekingWater' ? 'thirsty' :
+                g.state === 'seekingFood' ? 'hungry' : g.state === 'seekingMate' ? 'seeking mate' : 'idle');
             document.getElementById('insHunger').textContent = g.hunger.toFixed(0) + '%';
             document.getElementById('insThirst').textContent = g.thirst.toFixed(0) + '%';
             document.getElementById('insColor').textContent = `${c.r|0}, ${c.g|0}, ${c.b|0}`;
