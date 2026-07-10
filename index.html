@@ -157,12 +157,12 @@
         // ============================================================================
         const WORLD_WIDTH = 1000;
         const WORLD_HEIGHT = 700;
-        const HUNGER_DECAY_RATE = 0.7;
-        const THIRST_DECAY_RATE = 0.5;
+        const HUNGER_DECAY_RATE = 0.55;
+        const THIRST_DECAY_RATE = 0.4;
         const HUNGER_THRESHOLD = 40;
         const THIRST_THRESHOLD = 40;
         const APPLE_REGROW_INTERVAL = 5000;
-        const APPLE_REGROW_SECONDS = 5; // sim-seconds between apple regrowth (scales with sim speed)
+        const APPLE_REGROW_SECONDS = 3;
         const MAX_APPLES_PER_BUSH = 3;
         const GOBLET_SIZE = 24;
         const BUSH_SIZE = 60;
@@ -171,26 +171,19 @@
         const SEEK_FORCE = 1.0;
         const EAT_DURATION = 1.0;
         const DRINK_DURATION = 1.0;
-        const MATE_DURATION = 3.0; // parents stand still for a second when mating
+        const MATE_DURATION = 3.0;
         
         // Reproduction constants
-        const FEMALE_REPRO_THRESHOLD = 75; // females need hunger AND thirst >= 75% to breed
-        const MALE_REPRO_THRESHOLD = 65;   // males need hunger AND thirst >= 60% to breed
+        const FEMALE_REPRO_THRESHOLD = 60;
+        const MALE_REPRO_THRESHOLD = 50;
         const MIN_CHILD_SIZE = 6;
         const MAX_CHILD_SIZE = 10;
-        const REPRO_COOLDOWN = 6; // seconds a goblet must wait between matings
-        const GROW_TIME_SECONDS = 500; // sim-seconds from birth to fully grown (eating speeds this up)
-        const EAT_GROWTH_BONUS = 15;   // eating instantly advances growth by this many seconds
-
-        // Aging: sight and speed decline with age so old goblets slow down, struggle
-        // to reach resources, and eventually die — keeping the population in check.
-        const REPRO_MAX_AGE = 2000;    // sim-seconds after which a goblet can no longer breed
-        const AGING_RATE = 0.000075;   // fraction of sight/speed lost per sim-second of age
-        const AGING_FLOOR = 0.15;      // sight/speed never drop below this fraction of base
-        // effective = base * clamp(1 - age*AGING_RATE, AGING_FLOOR, 1)
-        function agingFactor(age) {
-            return Math.max(AGING_FLOOR, 1 - age * AGING_RATE);
-        }
+        const REPRO_COOLDOWN = 4;
+        const GROW_TIME_SECONDS = 200;
+        const EAT_GROWTH_BONUS = 15;
+        const REPRO_MAX_AGE = 5000;
+        const AGING_RATE = 0.000075;
+        const AGING_FLOOR = 0.15;
         
         const BERRY_POSITIONS = [
             { dx: -0.22, dy: 0.06 },
@@ -244,8 +237,6 @@
             return off;
         }
 
-        // Cache of tinted skin canvases, keyed by rounded RGB, so we tint each
-        // distinct color only once instead of every frame.
         let skinCache = {};
         function getTintedSkin(color) {
             let key = (color.r | 0) + ',' + (color.g | 0) + ',' + (color.b | 0);
@@ -308,23 +299,14 @@
         // ============================================================================
         // GENETICS
         // ============================================================================
-        // Starting-population spawn range for adult size. Genes have NO hard
-        // evolutionary limits — inherited traits drift freely (see inheritGenes).
         const ADULT_SIZE_MIN = 18, ADULT_SIZE_MAX = 30;
-
-        // Metabolism reference points (average starting goblet -> multiplier 1.0)
-        const SPEED_REF = 55; // midpoint of starting speed (40-70)
-        const SIZE_REF  = 24; // midpoint of starting adult size (18-30)
-        // Faster movement and a bigger body both make a goblet hungrier.
+        const SPEED_REF = 55;
+        const SIZE_REF  = 24;
+        
         function metabolism(g) {
             return (g.genes.speed / SPEED_REF) * 0.6 + (g.currentSize / SIZE_REF) * 0.4;
         }
 
-        // Genetic quality ("fitness") used when choosing a mate: a goblet breeds
-        // with the highest-quality eligible partner in its sight range.
-        //  + Sight range: pure benefit (finds food/water/mates sooner).
-        //  + Speed: helps reach resources, but costs metabolism -> modest weight.
-        //  - Adult size: only raises hunger cost -> penalized.
         const GENE_W_SIGHT = 1.0;
         const GENE_W_SPEED = 0.4;
         const GENE_W_SIZE  = 0.6;
@@ -334,62 +316,44 @@
                  - (g.genes.size / SIZE_REF) * GENE_W_SIZE;
         }
 
-        // Clamp helper
         function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-        // Standard normal random (Box-Muller). Bell-curve: small values common,
-        // large values increasingly rare.
         function gaussianRandom() {
             let u1 = Math.random() || 1e-9;
             let u2 = Math.random();
             return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
         }
 
-        // Heavy-tailed deviation used for genetic inheritance.
-        // Most offspring deviate only slightly from the parent average (Gaussian
-        // core, `amount` ≈ one standard deviation), but there is a rare chance of
-        // a "macro-mutation" that multiplies the deviation for an extreme result.
-        // The bigger the jump, the rarer it is.
-        const MACRO_MUTATION_CHANCE = 0.04; // ~4% of genes get an amplified deviation
+        const MACRO_MUTATION_CHANCE = 0.04;
         function deviation(amount) {
             let z = gaussianRandom();
             if (Math.random() < MACRO_MUTATION_CHANCE) {
-                // Amplify: an extra normal factor means small boosts are common,
-                // huge boosts rare — extreme but very occasional.
                 z *= 4 + Math.abs(gaussianRandom()) * 6;
             }
             return z * amount;
         }
 
-        // Color is a continuous RGB gene so it can blend (red + blue -> purple).
         const COLOR_RED  = { r: 220, g: 30,  b: 30  };
         const COLOR_BLUE = { r: 30,  g: 60,  b: 220 };
         function colorToCss(c) { return `rgb(${c.r|0}, ${c.g|0}, ${c.b|0})`; }
 
-        // Fresh random genes (for the starting population): each starts pure red or pure blue.
         function createGenes() {
             let base = Math.random() < 0.5 ? COLOR_RED : COLOR_BLUE;
             return {
                 color: { r: base.r, g: base.g, b: base.b },
-                sightRange: 80 + Math.random() * 40,                       // 80-120
-                speed: 40 + Math.random() * 30,                            // 40-70
-                size: ADULT_SIZE_MIN + Math.random() * (ADULT_SIZE_MAX - ADULT_SIZE_MIN) // adult size
+                sightRange: 80 + Math.random() * 40,
+                speed: 40 + Math.random() * 30,
+                size: ADULT_SIZE_MIN + Math.random() * (ADULT_SIZE_MAX - ADULT_SIZE_MIN)
             };
         }
 
-        // Average the two parents' genes, then apply a heavy-tailed deviation:
-        // usually similar to the parents, but rarely (and progressively rarer for
-        // bigger jumps) an extreme, totally-different result.
         function inheritGenes(parent1, parent2) {
-            // deviate(avg, amount) = avg + heavy-tailed deviation (see deviation())
             const deviate = (avg, amount) => avg + deviation(amount);
 
             let avgSight = (parent1.genes.sightRange + parent2.genes.sightRange) / 2;
             let avgSpeed = (parent1.genes.speed + parent2.genes.speed) / 2;
             let avgSize  = (parent1.genes.size + parent2.genes.size) / 2;
 
-            // Color: average each RGB channel + heavy-tailed deviation, so red x blue
-            // -> purple normally, but a rare mutant can shift color dramatically.
             let c1 = parent1.genes.color, c2 = parent2.genes.color;
             let color = {
                 r: clamp(Math.round((c1.r + c2.r) / 2 + deviation(20)), 0, 255),
@@ -397,8 +361,6 @@
                 b: clamp(Math.round((c1.b + c2.b) / 2 + deviation(20)), 0, 255)
             };
 
-            // No evolutionary limits — genes drift freely. Only a tiny floor of 1
-            // keeps them positive so movement/sight/rendering don't break.
             return {
                 color: color,
                 sightRange: Math.max(1, deviate(avgSight, 8)),
@@ -421,7 +383,6 @@
                 { x: 850, y: 150, radius: 60 }
             ];
 
-            // Spawn initial goblets: 8 males and 8 females
             for (let i = 0; i < 8; i++) spawnGoblet('male');
             for (let i = 0; i < 8; i++) spawnGoblet('female');
         }
@@ -448,10 +409,10 @@
             let goblet = {
                 x: x, y: y,
                 vx: 0, vy: 0,
-                hunger: 50,
-                thirst: 50,
+                hunger: 53,
+                thirst: 53,
                 genes: genes,
-                currentSize: genes.size, // starting population begins fully grown
+                currentSize: genes.size,
                 state: 'idle',
                 targetX: null,
                 targetY: null,
@@ -462,15 +423,18 @@
                 stuckCounter: 0,
                 reproCooldown: 0,
                 bobPhase: Math.random() * Math.PI * 2,
-                isGrown: true, // starting population is adult
+                isGrown: true,
                 restUntil: undefined,
                 id: nextGobletId++,
                 generation: 1,
                 gender: gender || (Math.random() < 0.5 ? 'male' : 'female'),
-                parents: [], // starting population has no parents
+                parents: [],
                 age: 0,
-                baseSightRange: genes.sightRange, // pristine values before aging decay
-                baseSpeed: genes.speed
+                baseSightRange: genes.sightRange,
+                baseSpeed: genes.speed,
+                // Track last few positions to detect true stuckness
+                posHistory: [],
+                stuckFrames: 0
             };
             goblets.push(goblet);
             return goblet;
@@ -480,11 +444,9 @@
         // REPRODUCTION
         // ============================================================================
         function canReproduce(g) {
-            // Must be fully grown and off cooldown, with enough hunger AND thirst.
-            // Females need to be better-fed than males to breed.
             let threshold = g.gender === 'female' ? FEMALE_REPRO_THRESHOLD : MALE_REPRO_THRESHOLD;
             return g.isGrown &&
-                   g.age < REPRO_MAX_AGE &&      // too old to breed past this age
+                   g.age < REPRO_MAX_AGE &&
                    g.reproCooldown <= 0 &&
                    g.hunger >= threshold &&
                    g.thirst >= threshold;
@@ -493,9 +455,6 @@
         function findMate(goblet) {
             if (!canReproduce(goblet)) return null;
 
-            // Among all eligible opposite-gender mates within sight range, pick the
-            // one with the BEST genes (highest geneQuality). Distance only decides
-            // ties, so a goblet always chooses its best available option.
             let bestMate = null;
             let bestQuality = -Infinity;
             let bestDist = Infinity;
@@ -504,10 +463,10 @@
             for (let other of goblets) {
                 if (other === goblet) continue;
                 if (!canReproduce(other)) continue;
-                if (other.gender === goblet.gender) continue; // only male + female mate
+                if (other.gender === goblet.gender) continue;
 
                 let dist = Math.hypot(goblet.x - other.x, goblet.y - other.y);
-                if (dist > sight) continue; // must be in viewing range
+                if (dist > sight) continue;
 
                 let q = geneQuality(other);
                 if (q > bestQuality || (q === bestQuality && dist < bestDist)) {
@@ -521,17 +480,14 @@
         }
 
         function reproduce(goblet1, goblet2) {
-            // Cost of reproduction: both parents lose 30 hunger and thirst
-            goblet1.hunger -= 30;
-            goblet1.thirst -= 30;
-            goblet2.hunger -= 30;
-            goblet2.thirst -= 30;
+            goblet1.hunger -= 18;
+            goblet1.thirst -= 18;
+            goblet2.hunger -= 18;
+            goblet2.thirst -= 18;
 
-            // Cooldown before either parent can mate again
             goblet1.reproCooldown = REPRO_COOLDOWN;
             goblet2.reproCooldown = REPRO_COOLDOWN;
 
-            // Both parents stand still for a moment while mating (like eating/drinking)
             goblet1.isActing = true;
             goblet1.actionTimer = MATE_DURATION;
             goblet1.vx = 0; goblet1.vy = 0;
@@ -539,24 +495,19 @@
             goblet2.actionTimer = MATE_DURATION;
             goblet2.vx = 0; goblet2.vy = 0;
 
-            // Create child with inherited genes (average of parents + slight deviation)
             let childGenes = inheritGenes(goblet1, goblet2);
             
-            // Find spawn position near parents
             let angle = Math.random() * Math.PI * 2;
             let distance = 30 + Math.random() * 20;
             let x = (goblet1.x + goblet2.x) / 2 + Math.cos(angle) * distance;
             let y = (goblet1.y + goblet2.y) / 2 + Math.sin(angle) * distance;
             
-            // Ensure child is in bounds and not in lake
             x = Math.max(GOBLET_SIZE, Math.min(WORLD_WIDTH - GOBLET_SIZE, x));
             y = Math.max(GOBLET_SIZE, Math.min(WORLD_HEIGHT - GOBLET_SIZE, y));
             
-            // Check if position is in lake
             for (let lake of lakes) {
                 let dist = Math.hypot(x - lake.x, y - lake.y);
                 if (dist < lake.radius + GOBLET_SIZE) {
-                    // Try to find alternative position
                     for (let attempt = 0; attempt < 10; attempt++) {
                         let newAngle = Math.random() * Math.PI * 2;
                         let newDist = 20 + Math.random() * 30;
@@ -572,9 +523,7 @@
                 }
             }
             
-            // Child spawns small: a random size between 6 and 10, grows up to genes.size by eating
             let startSize = MIN_CHILD_SIZE + Math.random() * (MAX_CHILD_SIZE - MIN_CHILD_SIZE);
-            // Make sure the adult size is at least a bit above the birth size so there's room to grow
             if (childGenes.size <= startSize) childGenes.size = startSize + 4;
 
             let child = {
@@ -599,18 +548,140 @@
                 restUntil: undefined,
                 id: nextGobletId++,
                 generation: Math.max(goblet1.generation, goblet2.generation) + 1,
-                gender: Math.random() < 0.5 ? 'male' : 'female', // 50/50 at birth
+                gender: Math.random() < 0.5 ? 'male' : 'female',
                 parents: [goblet1.id, goblet2.id],
                 age: 0,
-                // Offspring inherit their parents' CURRENT (age-decayed) sight/speed:
-                // childGenes was built from the parents' present genes values.
                 baseSightRange: childGenes.sightRange,
-                baseSpeed: childGenes.speed
+                baseSpeed: childGenes.speed,
+                posHistory: [],
+                stuckFrames: 0
             };
 
             goblets.push(child);
         }
 
+        function agingFactor(age) {
+            return Math.max(AGING_FLOOR, 1 - age * AGING_RATE);
+        }
+
+        // ============================================================================
+        // IMPROVED NAVIGATION - FIX FOR LAKE STUCK ISSUE
+        // ============================================================================
+        
+        // Check if a point is inside any lake
+        function isPointInLake(px, py, margin) {
+            margin = margin || 0;
+            for (let lake of lakes) {
+                if (Math.hypot(px - lake.x, py - lake.y) < lake.radius + margin) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Check if heading is blocked by world border or lake (when not thirsty)
+        function headingBlocked(goblet, angle, maxDist) {
+            let sr = maxDist !== undefined ? maxDist : goblet.genes.sightRange;
+            let ca = Math.cos(angle), sa = Math.sin(angle);
+            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
+            let step = 10;
+            let margin = GOBLET_SIZE / 2 + 3;
+            
+            for (let d = step; d <= sr; d += step) {
+                let px = goblet.x + ca * d;
+                let py = goblet.y + sa * d;
+                
+                // World border check
+                if (px < GOBLET_SIZE || px > WORLD_WIDTH - GOBLET_SIZE ||
+                    py < GOBLET_SIZE || py > WORLD_HEIGHT - GOBLET_SIZE) {
+                    return true;
+                }
+                
+                // Lake check (only if not thirsty)
+                if (avoidLakes) {
+                    if (isPointInLake(px, py, margin)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Find the best clear heading - IMPROVED to prefer directions toward target
+        function clearHeading(goblet, angle, maxDist, targetAngle) {
+            let sr = maxDist !== undefined ? maxDist : goblet.genes.sightRange;
+            
+            // First, try directions close to the original angle (or target angle if provided)
+            let searchAngles = [];
+            let baseAngle = targetAngle !== undefined ? targetAngle : angle;
+            
+            // Generate a list of angles to try, prioritizing those close to the base angle
+            for (let i = 0; i <= 20; i++) {
+                let spread = i * (Math.PI / 24);
+                // Try positive and negative deviations
+                if (i === 0) {
+                    searchAngles.push(baseAngle);
+                } else {
+                    searchAngles.push(baseAngle + spread);
+                    searchAngles.push(baseAngle - spread);
+                    // Also try a bit further out for more variety
+                    if (i > 5) {
+                        searchAngles.push(baseAngle + spread * 1.5);
+                        searchAngles.push(baseAngle - spread * 1.5);
+                    }
+                }
+            }
+            
+            // Also add some random angles as fallback
+            for (let i = 0; i < 8; i++) {
+                searchAngles.push(Math.random() * Math.PI * 2);
+            }
+            
+            // Try each angle
+            for (let testAngle of searchAngles) {
+                if (!headingBlocked(goblet, testAngle, sr)) {
+                    return testAngle;
+                }
+            }
+            
+            // Ultimate fallback: aim toward center
+            return Math.atan2(WORLD_HEIGHT / 2 - goblet.y, WORLD_WIDTH / 2 - goblet.x);
+        }
+
+        // Check if goblet is truly stuck (hasn't moved in a while)
+        function isTrulyStuck(goblet) {
+            // Store position history (every few frames)
+            let now = gameTime;
+            if (!goblet._lastPosLog || now - goblet._lastPosLog > 2) {
+                goblet._lastPosLog = now;
+                if (!goblet._posLog) goblet._posLog = [];
+                goblet._posLog.push({x: goblet.x, y: goblet.y, time: now});
+                if (goblet._posLog.length > 10) goblet._posLog.shift();
+            }
+            
+            if (goblet._posLog && goblet._posLog.length >= 5) {
+                // Check if all recent positions are very close
+                let avgX = 0, avgY = 0;
+                for (let p of goblet._posLog) {
+                    avgX += p.x;
+                    avgY += p.y;
+                }
+                avgX /= goblet._posLog.length;
+                avgY /= goblet._posLog.length;
+                
+                let maxDist = 0;
+                for (let p of goblet._posLog) {
+                    let d = Math.hypot(p.x - avgX, p.y - avgY);
+                    if (d > maxDist) maxDist = d;
+                }
+                
+                // If all positions are within 5px over the last 2 seconds, we're stuck
+                if (maxDist < 5 && goblet._posLog.length >= 5) {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         // ============================================================================
         // UPDATE LOOP
@@ -618,7 +689,6 @@
         function update(deltaTime) {
             gameTime += deltaTime;
 
-            // Update each goblet
             for (let i = goblets.length - 1; i >= 0; i--) {
                 let goblet = goblets[i];
 
@@ -639,7 +709,6 @@
                     continue;
                 }
 
-                // Standing still preserves hunger/thirst (heavily reduced decay)
                 let isResting = goblet.state === 'idle' && goblet.restUntil !== undefined && gameTime < goblet.restUntil;
                 let restMult = isResting ? 0.1 : 1;
                 goblet.hunger -= HUNGER_DECAY_RATE * metabolism(goblet) * deltaTime * restMult;
@@ -650,20 +719,16 @@
                     continue;
                 }
 
-                // Age: sight and speed decay as the goblet gets older.
                 goblet.age += deltaTime;
                 let af = agingFactor(goblet.age);
                 goblet.genes.sightRange = goblet.baseSightRange * af;
                 goblet.genes.speed = goblet.baseSpeed * af;
 
-                // Tick down reproduction cooldown
                 if (goblet.reproCooldown > 0) goblet.reproCooldown -= deltaTime;
 
-                // Grow over time: reach adult size after GROW_TIME_SECONDS from
-                // birth. Eating adds bonus progress on top (see checkBushInteraction).
                 if (!goblet.isGrown) {
                     let range = goblet.genes.size - goblet.birthSize;
-                    let rate = range / GROW_TIME_SECONDS; // size units per sim-second
+                    let rate = range / GROW_TIME_SECONDS;
                     goblet.currentSize += rate * deltaTime;
                     if (goblet.currentSize >= goblet.genes.size) {
                         goblet.currentSize = goblet.genes.size;
@@ -671,17 +736,14 @@
                     }
                 }
 
-                // Mating: if this goblet is eligible and any eligible mate is in
-                // range, they mate right away (regardless of what they were doing).
                 if (canReproduce(goblet)) {
                     let mate = findMate(goblet);
                     if (mate) {
                         reproduce(goblet, mate);
-                        continue; // both parents are now paused (isActing)
+                        continue;
                     }
                 }
 
-                // State machine (thirst takes priority, then hunger, else idle)
                 if (goblet.thirst < THIRST_THRESHOLD && goblet.state !== 'seekingWater') {
                     goblet.state = 'seekingWater';
                     goblet.targetX = null;
@@ -702,7 +764,6 @@
                 checkBushInteraction(goblet);
             }
 
-            // Regrow apples (sim-time based so it scales with sim speed)
             for (let bush of bushes) {
                 if (gameTime - bush.lastRegrow > APPLE_REGROW_SECONDS && bush.apples < MAX_APPLES_PER_BUSH) {
                     bush.apples++;
@@ -715,53 +776,57 @@
             if (goblet.isActing) return;
 
             if (goblet.state === 'seekingWater') {
-                // Look for any lake within sight radius
-                let closestLake = null;
-                let closestDist = goblet.genes.sightRange;
-                for (let lake of lakes) {
-                    let dist = Math.hypot(goblet.x - lake.x, goblet.y - lake.y);
-                    if (dist < closestDist) {
-                        closestDist = dist;
-                        closestLake = lake;
-                    }
-                }
-
-                if (closestLake) {
-                    // Water in sight: walk straight toward it
-                    goblet.targetX = closestLake.x;
-                    goblet.targetY = closestLake.y;
-                } else {
-                    // Nothing in sight: wander (heading-based) until water comes in view
-                    goblet.targetX = null;
-                    goblet.targetY = null;
-                    wander(goblet, deltaTime);
-                }
+                seekResource(goblet, deltaTime, 'water');
             } else if (goblet.state === 'seekingFood') {
-                // Look for any bush that has apples within sight radius
-                let closestBush = null;
-                let closestDist = goblet.genes.sightRange;
-                for (let bush of bushes) {
-                    if (bush.apples > 0) {
-                        let dist = Math.hypot(goblet.x - bush.x, goblet.y - bush.y);
-                        if (dist < closestDist) {
-                            closestDist = dist;
-                            closestBush = bush;
-                        }
-                    }
-                }
+                seekResource(goblet, deltaTime, 'food');
+            } else {
+                goblet.commitX = null;
+                goblet.commitY = null;
+                goblet.targetX = null;
+                goblet.targetY = null;
+                wander(goblet, deltaTime);
+            }
+        }
 
-                if (closestBush) {
-                    // Food in sight: walk straight toward it
-                    goblet.targetX = closestBush.x;
-                    goblet.targetY = closestBush.y;
-                } else {
-                    // Nothing in sight: wander (heading-based) until food comes in view
-                    goblet.targetX = null;
-                    goblet.targetY = null;
-                    wander(goblet, deltaTime);
+        function seekResource(goblet, deltaTime, kind) {
+            let best = null, bestDist = goblet.genes.sightRange;
+            if (kind === 'water') {
+                for (let lake of lakes) {
+                    let d = Math.hypot(goblet.x - lake.x, goblet.y - lake.y);
+                    if (d < bestDist) { bestDist = d; best = lake; }
                 }
-            } else if (goblet.state === 'idle') {
-                // Not hungry or thirsty: waddle around with gentle random movement
+            } else {
+                for (let bush of bushes) {
+                    if (bush.apples <= 0) continue;
+                    let d = Math.hypot(goblet.x - bush.x, goblet.y - bush.y);
+                    if (d < bestDist) { bestDist = d; best = bush; }
+                }
+            }
+
+            if (best) {
+                goblet.commitX = best.x;
+                goblet.commitY = best.y;
+                goblet.commitBestDist = bestDist;
+                goblet.commitProgressTime = gameTime;
+            } else if (goblet.commitX != null) {
+                let dc = Math.hypot(goblet.x - goblet.commitX, goblet.y - goblet.commitY);
+                if (goblet.commitBestDist === undefined || dc < goblet.commitBestDist - 1) {
+                    goblet.commitBestDist = dc;
+                    goblet.commitProgressTime = gameTime;
+                }
+                let arrived = dc < BUSH_SIZE / 2 + GOBLET_SIZE;
+                let stalled = gameTime - (goblet.commitProgressTime || gameTime) > 10;
+                if (arrived || stalled) {
+                    goblet.commitX = null;
+                    goblet.commitY = null;
+                    goblet.commitBestDist = undefined;
+                }
+            }
+
+            if (goblet.commitX != null) {
+                goblet.targetX = goblet.commitX;
+                goblet.targetY = goblet.commitY;
+            } else {
                 goblet.targetX = null;
                 goblet.targetY = null;
                 wander(goblet, deltaTime);
@@ -769,28 +834,21 @@
         }
 
         function wander(goblet, deltaTime) {
-            // Goblets are NEVER allowed to stand still when they have something to
-            // pursue: food/water when hungry/thirsty, OR a partner when they are
-            // eligible to breed. In all these cases they keep moving to search.
             let isUrgent = goblet.state === 'seekingFood' || goblet.state === 'seekingWater' ||
                            goblet.hunger < HUNGER_THRESHOLD || goblet.thirst < THIRST_THRESHOLD ||
                            canReproduce(goblet);
 
-            // Cancel any rest if hungry/thirsty — constant search
             if (isUrgent) {
                 goblet.restUntil = undefined;
             }
 
-            // Idle pause: stand still for a random time after walking
             if (!isUrgent && goblet.restUntil !== undefined && gameTime < goblet.restUntil) {
                 goblet.vx = 0;
                 goblet.vy = 0;
                 return;
             }
 
-            // Re-pick a fresh random heading on the 2s timer.
             if (gameTime - goblet.lastWanderChange > 2) {
-                // Only rest when idle, not when searching for resources
                 if (!isUrgent && (goblet.restUntil === undefined || gameTime >= goblet.restUntil)) {
                     goblet.restUntil = gameTime + Math.random() * 5;
                     goblet.vx = 0;
@@ -804,104 +862,16 @@
                 goblet.restUntil = undefined;
             }
 
-            // EVERY frame: if the current heading points at impassable terrain
-            // within sight range, redirect to any clear direction immediately.
-            // This prevents getting pinned against the world border.
-            if (headingBlocked(goblet, goblet.wanderAngle)) {
-                goblet.wanderAngle = clearHeading(goblet, goblet.wanderAngle);
-                goblet.restUntil = undefined; // don't stand still facing a wall
+            // Check if heading is blocked, but only if not thirsty (thirsty goblets can enter water)
+            if (goblet.thirst >= THIRST_THRESHOLD) {
+                if (headingBlocked(goblet, goblet.wanderAngle)) {
+                    goblet.wanderAngle = clearHeading(goblet, goblet.wanderAngle);
+                    goblet.restUntil = undefined;
+                }
             }
 
             goblet.vx = Math.cos(goblet.wanderAngle) * WANDER_FORCE;
             goblet.vy = Math.sin(goblet.wanderAngle) * WANDER_FORCE;
-        }
-
-        // Does walking along `angle` run into impassable terrain within sight range?
-        // Samples several points along the ray so a goblet right at the edge still
-        // detects the border ahead of it.
-        function headingBlocked(goblet, angle) {
-            let sr = goblet.genes.sightRange;
-            let ca = Math.cos(angle), sa = Math.sin(angle);
-            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
-            // Sample along the ray (not just the far end) to catch nearby borders.
-            for (let t = 0.25; t <= 1.0; t += 0.25) {
-                let px = goblet.x + ca * sr * t;
-                let py = goblet.y + sa * sr * t;
-                if (px < GOBLET_SIZE || px > WORLD_WIDTH - GOBLET_SIZE ||
-                    py < GOBLET_SIZE || py > WORLD_HEIGHT - GOBLET_SIZE) {
-                    return true;
-                }
-                if (avoidLakes) {
-                    for (let lake of lakes) {
-                        if (Math.hypot(px - lake.x, py - lake.y) < lake.radius + GOBLET_SIZE) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Find any heading that is NOT blocked, searching outward from `angle`.
-        function clearHeading(goblet, angle) {
-            for (let i = 1; i <= 12; i++) {
-                for (let sign of [1, -1]) {
-                    let test = angle + sign * i * (Math.PI / 12);
-                    if (!headingBlocked(goblet, test)) return test;
-                }
-            }
-            // Last resort: aim straight back toward the map center.
-            return Math.atan2(WORLD_HEIGHT / 2 - goblet.y, WORLD_WIDTH / 2 - goblet.x);
-        }
-
-        // Smallest absolute difference between two angles (radians).
-        function angleDiff(a, b) {
-            let d = Math.abs(a - b) % (Math.PI * 2);
-            return d > Math.PI ? Math.PI * 2 - d : d;
-        }
-
-        // Heading toward (tx,ty) that smoothly ARCS around any lake blocking the
-        // straight path (tangent-aim navigation). Returns an angle in radians.
-        // Avoids the old "slide into the edge and stall" behaviour that trapped
-        // goblets behind lakes.
-        function steerAroundLakes(goblet, tx, ty) {
-            let dx = tx - goblet.x, dy = ty - goblet.y;
-            let distToTarget = Math.hypot(dx, dy) || 1;
-            let desired = Math.atan2(dy, dx);
-            let cd = Math.cos(desired), sd = Math.sin(desired);
-
-            // Find the nearest lake that actually sits across the path to target.
-            let block = null, blockCDist = Infinity;
-            for (let lake of lakes) {
-                let R = lake.radius + GOBLET_SIZE / 2 + 4;
-                let lx = lake.x - goblet.x, ly = lake.y - goblet.y;
-                let cDist = Math.hypot(lx, ly);
-                let along = lx * cd + ly * sd;        // distance to closest approach
-                if (along <= 0) continue;             // lake is behind us
-                if (along - R > distToTarget) continue; // lake is past the target
-                let perp = Math.abs(-lx * sd + ly * cd); // sideways offset from path
-                if (perp < R && cDist < blockCDist) {
-                    blockCDist = cDist;
-                    block = lake;
-                }
-            }
-            if (!block) return desired; // clear path
-
-            // Steer along the tangent of the blocking lake, on the side that keeps
-            // us closest to the direction we actually want to go.
-            let lx = block.x - goblet.x, ly = block.y - goblet.y;
-            let cDist = Math.hypot(lx, ly) || 1;
-            let R = block.radius + GOBLET_SIZE / 2 + 4;
-            let angleToC = Math.atan2(ly, lx);
-            if (cDist > R) {
-                let alpha = Math.asin(Math.min(1, R / cDist));
-                let a1 = angleToC + alpha, a2 = angleToC - alpha;
-                return angleDiff(a1, desired) <= angleDiff(a2, desired) ? a1 : a2;
-            } else {
-                // Already at/inside the buffer ring: head straight along the tangent.
-                let a1 = angleToC + Math.PI / 2, a2 = angleToC - Math.PI / 2;
-                return angleDiff(a1, desired) <= angleDiff(a2, desired) ? a1 : a2;
-            }
         }
 
         function moveGoblet(goblet, deltaTime) {
@@ -912,62 +882,61 @@
             }
 
             let speed = goblet.genes.speed;
-            // A thirsty goblet is allowed to walk into water to drink; everyone
-            // else treats lakes as solid obstacles.
             let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
 
-            // Desired velocity toward the target (resource/mate). When not seeking
-            // water, arc around any lake blocking the straight path.
+            let heading;
+            let targetAngle = null;
+            
             if (goblet.targetX !== null && goblet.targetY !== null) {
-                let heading;
-                if (avoidLakes) {
-                    heading = steerAroundLakes(goblet, goblet.targetX, goblet.targetY);
-                } else {
-                    heading = Math.atan2(goblet.targetY - goblet.y, goblet.targetX - goblet.x);
-                }
-                goblet.vx = Math.cos(heading) * speed;
-                goblet.vy = Math.sin(heading) * speed;
-            } else {
-                // Wander: velocity already set by wander(); just normalize to speed.
-                let m = Math.hypot(goblet.vx, goblet.vy) || 1;
-                goblet.vx = (goblet.vx / m) * speed;
-                goblet.vy = (goblet.vy / m) * speed;
+                let dx = goblet.targetX - goblet.x, dy = goblet.targetY - goblet.y;
+                let distToTarget = Math.hypot(dx, dy) || 1;
+                heading = Math.atan2(dy, dx);
+                targetAngle = heading;
 
-                // Safety tangent-slide if a wander heading still grazes a lake.
                 if (avoidLakes) {
-                    for (let lake of lakes) {
-                        let dx = goblet.x - lake.x;
-                        let dy = goblet.y - lake.y;
-                        let d = Math.hypot(dx, dy) || 1;
-                        let minDist = lake.radius + GOBLET_SIZE / 2;
-                        if (d < minDist + 6) {
-                            let nx = dx / d, ny = dy / d;
-                            let vDotN = goblet.vx * nx + goblet.vy * ny;
-                            if (vDotN < 0) {
-                                let sp = Math.hypot(goblet.vx, goblet.vy) || speed;
-                                let tx = -ny, ty = nx;
-                                if (goblet.vx * tx + goblet.vy * ty < 0) { tx = ny; ty = -nx; }
-                                goblet.vx = tx * sp;
-                                goblet.vy = ty * sp;
-                            }
-                        }
+                    let look = Math.max(30, Math.min(distToTarget, goblet.genes.sightRange));
+                    if (headingBlocked(goblet, heading, look)) {
+                        let newHeading = clearHeading(goblet, heading, look, targetAngle);
+                        heading = newHeading;
                     }
                 }
+            } else {
+                if (Math.abs(goblet.vx) + Math.abs(goblet.vy) < 1e-6) {
+                    goblet.vx = 0; goblet.vy = 0;
+                    return;
+                }
+                heading = Math.atan2(goblet.vy, goblet.vx);
+                
+                // Check if wander heading is blocked
+                if (avoidLakes && headingBlocked(goblet, heading)) {
+                    heading = clearHeading(goblet, heading, undefined, null);
+                    goblet.wanderAngle = heading;
+                }
             }
+
+            goblet.vx = Math.cos(heading) * speed;
+            goblet.vy = Math.sin(heading) * speed;
 
             let newX = goblet.x + goblet.vx * deltaTime;
             let newY = goblet.y + goblet.vy * deltaTime;
 
-            // Hard guarantee: never end up inside a lake (unless heading in to drink)
             if (avoidLakes) {
                 for (let lake of lakes) {
                     let dx = newX - lake.x;
                     let dy = newY - lake.y;
                     let d = Math.hypot(dx, dy) || 1;
-                    let minDist = lake.radius + GOBLET_SIZE / 2;
+                    let minDist = lake.radius + GOBLET_SIZE / 2 + 2;
                     if (d < minDist) {
                         newX = lake.x + (dx / d) * minDist;
                         newY = lake.y + (dy / d) * minDist;
+                        let pushAngle = Math.atan2(dy, dx);
+                        goblet.vx = Math.cos(pushAngle) * speed * 0.3;
+                        goblet.vy = Math.sin(pushAngle) * speed * 0.3;
+                        goblet.commitX = null;
+                        goblet.commitY = null;
+                        goblet.commitBestDist = undefined;
+                        goblet.targetX = null;
+                        goblet.targetY = null;
                     }
                 }
             }
@@ -981,7 +950,6 @@
 
         function checkLakeInteraction(goblet) {
             if (goblet.isActing) return;
-            // Only drink when actually thirsty (seeking water); otherwise pass by
             if (goblet.state !== 'seekingWater') return;
 
             for (let lake of lakes) {
@@ -993,6 +961,8 @@
                     goblet.state = 'idle';
                     goblet.targetX = null;
                     goblet.targetY = null;
+                    goblet.commitX = null;
+                    goblet.commitY = null;
                     return;
                 }
             }
@@ -1000,7 +970,6 @@
 
         function checkBushInteraction(goblet) {
             if (goblet.isActing) return;
-            // Only eat when actually hungry (seeking food); otherwise pass by
             if (goblet.state !== 'seekingFood') return;
 
             for (let bush of bushes) {
@@ -1009,8 +978,6 @@
                     bush.apples--;
                     goblet.hunger = 100;
 
-                    // Eating speeds up growth: advance by EAT_GROWTH_BONUS seconds
-                    // worth of the normal time-based growth.
                     if (!goblet.isGrown) {
                         let range = goblet.genes.size - goblet.birthSize;
                         let bonus = (range / GROW_TIME_SECONDS) * EAT_GROWTH_BONUS;
@@ -1025,6 +992,8 @@
                     goblet.state = 'idle';
                     goblet.targetX = null;
                     goblet.targetY = null;
+                    goblet.commitX = null;
+                    goblet.commitY = null;
                     bush.lastRegrow = gameTime;
                     return;
                 }
@@ -1072,8 +1041,6 @@
                 }
             }
 
-            // If a goblet is selected, gather ALL of its descendants (children,
-            // grandchildren, ...) so we can highlight them.
             let descendantIds = null;
             if (selectedGobletId !== null) {
                 descendantIds = new Set();
@@ -1089,12 +1056,10 @@
                 }
             }
 
-            // Draw goblets
             for (let goblet of goblets) {
                 let skin = getTintedSkin(goblet.genes.color);
-                let size = Math.max(10, goblet.currentSize); // Minimum size for visibility
+                let size = Math.max(10, goblet.currentSize);
 
-                // Highlight descendants of the selected goblet with a green ring
                 if (descendantIds && descendantIds.has(goblet.id)) {
                     ctx.beginPath();
                     ctx.arc(goblet.x, goblet.y, size / 2 + 4, 0, Math.PI * 2);
@@ -1103,7 +1068,6 @@
                     ctx.stroke();
                 }
 
-                // Selected goblet: draw its viewing range and a highlight ring
                 if (goblet.id === selectedGobletId) {
                     ctx.beginPath();
                     ctx.arc(goblet.x, goblet.y, goblet.genes.sightRange, 0, Math.PI * 2);
@@ -1118,13 +1082,72 @@
                     ctx.lineWidth = 2;
                     ctx.strokeStyle = '#fbbf24';
                     ctx.stroke();
+
+                    // Pathfinding visualization
+                    let sr = goblet.genes.sightRange;
+
+                    // 360° blocked-ray sweep
+                    let nRays = 24;
+                    for (let ri = 0; ri < nRays; ri++) {
+                        let a = (ri / nRays) * Math.PI * 2;
+                        let blocked = headingBlocked(goblet, a, sr);
+                        if (blocked) {
+                            let rx = goblet.x + Math.cos(a) * sr;
+                            let ry = goblet.y + Math.sin(a) * sr;
+                            ctx.beginPath();
+                            ctx.moveTo(goblet.x, goblet.y);
+                            ctx.lineTo(rx, ry);
+                            ctx.lineWidth = 1;
+                            ctx.strokeStyle = 'rgba(239, 68, 68, 0.25)';
+                            ctx.stroke();
+                        }
+                    }
+
+                    // Line to committed target
+                    if (goblet.commitX != null) {
+                        ctx.beginPath();
+                        ctx.moveTo(goblet.x, goblet.y);
+                        ctx.lineTo(goblet.commitX, goblet.commitY);
+                        ctx.setLineDash([4, 4]);
+                        ctx.lineWidth = 1.5;
+                        ctx.strokeStyle = 'rgba(251, 191, 36, 0.7)';
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        ctx.beginPath();
+                        ctx.arc(goblet.commitX, goblet.commitY, 5, 0, Math.PI * 2);
+                        ctx.lineWidth = 1.5;
+                        ctx.strokeStyle = '#fbbf24';
+                        ctx.stroke();
+                    }
+
+                    // Current movement heading arrow
+                    let spd = Math.abs(goblet.vx) + Math.abs(goblet.vy);
+                    if (spd > 0.1) {
+                        let heading = Math.atan2(goblet.vy, goblet.vx);
+                        let hLen = Math.min(sr * 0.5, 50);
+                        let hx = goblet.x + Math.cos(heading) * hLen;
+                        let hy = goblet.y + Math.sin(heading) * hLen;
+                        ctx.beginPath();
+                        ctx.moveTo(goblet.x, goblet.y);
+                        ctx.lineTo(hx, hy);
+                        ctx.lineWidth = 2.5;
+                        ctx.strokeStyle = '#22c55e';
+                        ctx.stroke();
+                        let aSize = 7;
+                        ctx.beginPath();
+                        ctx.moveTo(hx, hy);
+                        ctx.lineTo(hx - Math.cos(heading - 0.5) * aSize, hy - Math.sin(heading - 0.5) * aSize);
+                        ctx.moveTo(hx, hy);
+                        ctx.lineTo(hx - Math.cos(heading + 0.5) * aSize, hy - Math.sin(heading + 0.5) * aSize);
+                        ctx.lineWidth = 2.5;
+                        ctx.stroke();
+                    }
                 }
 
-                // Walking bob: hop the sprite up and down slightly while moving
                 let moving = !goblet.isActing && (Math.abs(goblet.vx) + Math.abs(goblet.vy)) > 1;
                 let bob = 0;
                 if (moving) {
-                    let freq = 8 + goblet.genes.speed * 0.15; // faster goblets bob faster
+                    let freq = 8 + goblet.genes.speed * 0.15;
                     bob = Math.abs(Math.sin(gameTime * freq + goblet.bobPhase)) * (size * 0.15);
                 }
 
@@ -1134,14 +1157,12 @@
                 if (skin) {
                     ctx.drawImage(skin, dx, dy, size, size);
                 }
-                // Females wear the bow (female outline); males use the plain outline
                 let outline = (goblet.gender === 'female' && assets.femaleOutline)
                     ? assets.femaleOutline : assets.humanOutline;
                 if (outline) {
                     ctx.drawImage(outline, dx, dy, size, size);
                 }
 
-                // Show growth status for juveniles (a small progress bar)
                 if (!goblet.isGrown) {
                     let progress = clamp(goblet.currentSize / goblet.genes.size, 0, 1);
                     let barWidth = 20;
@@ -1154,7 +1175,6 @@
                     ctx.fillRect(barX, barY, progress * barWidth, barHeight);
                 }
 
-                // Bars
                 let barWidth = 20;
                 let barHeight = 2;
                 let barX = goblet.x - barWidth / 2;
@@ -1208,7 +1228,6 @@
             canvas.style.cursor = 'grabbing';
         });
 
-        // Convert a screen click to world coords and select the goblet under it
         function selectGobletAt(clientX, clientY) {
             let rect = canvas.getBoundingClientRect();
             let mx = (clientX - rect.left) * (canvas.width / rect.width);
@@ -1243,14 +1262,12 @@
         window.addEventListener('mouseup', (e) => {
             isDragging = false;
             canvas.style.cursor = 'grab';
-            // Treat as a click (not a drag) if the pointer barely moved
             let moved = Math.hypot(e.clientX - mouseDownPos.x, e.clientY - mouseDownPos.y);
             if (moved < 5 && e.target === canvas) {
                 selectGobletAt(e.clientX, e.clientY);
             }
         });
 
-        // Populate / show / hide the inspector panel for the selected goblet
         function updateInspector() {
             let panel = document.getElementById('inspector');
             if (selectedGobletId === null) { panel.style.display = 'none'; return; }
@@ -1288,7 +1305,6 @@
             document.getElementById('inspector').style.display = 'none';
         });
 
-        // Spacebar toggles pause
         window.addEventListener('keydown', (e) => {
             if (e.code === 'Space') {
                 e.preventDefault();
@@ -1316,10 +1332,10 @@
         // ============================================================================
         // SIMULATION SPEED CONTROLS
         // ============================================================================
-        let simSpeed = 1;                 // how many sim-steps happen per real second-equivalent
+        let simSpeed = 1;
         const SPEED_OPTIONS = [1, 2, 4, 6, 10, 20, 100];
-        const FIXED_DT = 1 / 60;          // fixed timestep per sub-step (stable physics)
-        const MAX_STEPS_PER_FRAME = 200;  // safety cap so the tab never locks up
+        const FIXED_DT = 1 / 60;
+        const MAX_STEPS_PER_FRAME = 120;
 
         function buildSpeedControls() {
             let container = document.getElementById('controls');
@@ -1351,10 +1367,8 @@
             let now = performance.now();
             let realDelta = (now - lastTime) / 1000;
             lastTime = now;
-            // Clamp so a backgrounded tab doesn't produce a huge catch-up spike
             realDelta = Math.min(realDelta, 0.1);
 
-            // Advance sim by realDelta * simSpeed, broken into stable sub-steps
             if (!paused) {
                 let simTime = realDelta * simSpeed;
                 let steps = Math.min(Math.max(1, Math.ceil(simTime / FIXED_DT)), MAX_STEPS_PER_FRAME);
