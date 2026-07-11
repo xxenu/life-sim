@@ -202,7 +202,7 @@
         let pendingPoops = [];
         let lakes = [];
         const POOP_DELAY = 50;
-        const POOP_SPROUT_CHANCE = 0.2;
+        const POOP_SPROUT_CHANCE = 0.1;
         const BUSH_STAGE_DURATION = 150;
         const BUSH_STAGES = ['poop', 'bush1', 'bush2', 'bush3', 'bush4'];
         const POOP_SIZE = 20;
@@ -371,12 +371,15 @@
             return z * amount;
         }
 
-        const COLOR_RED  = { r: 220, g: 30,  b: 30  };
-        const COLOR_BLUE = { r: 30,  g: 60,  b: 220 };
+        const SPAWN_COLORS = [
+            { r: 220, g: 30,  b: 30  },
+            { r: 30,  g: 180, b: 30  },
+            { r: 30,  g: 60,  b: 220 }
+        ];
         function colorToCss(c) { return `rgb(${c.r|0}, ${c.g|0}, ${c.b|0})`; }
 
         function createGenes() {
-            let base = Math.random() < 0.5 ? COLOR_RED : COLOR_BLUE;
+            let base = SPAWN_COLORS[Math.floor(Math.random() * SPAWN_COLORS.length)];
             return {
                 color: { r: base.r, g: base.g, b: base.b },
                 sightRange: 80 + Math.random() * 40,
