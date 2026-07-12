@@ -36,11 +36,51 @@
             left: 50%;
             transform: translateX(-50%);
             display: flex;
-            gap: 6px;
+            align-items: center;
+            gap: 10px;
             background: rgba(0,0,0,0.7);
-            padding: 8px 10px;
+            padding: 8px 14px;
             border-radius: 8px;
             z-index: 10;
+        }
+        .controls .speed-caption {
+            font-size: 13px;
+            color: #ccc;
+        }
+        .controls .speed-readout {
+            font-size: 14px;
+            font-variant-numeric: tabular-nums;
+            color: #60a5fa;
+            min-width: 52px;
+            text-align: right;
+        }
+        #speedSlider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 260px;
+            height: 5px;
+            border-radius: 3px;
+            background: #444;
+            outline: none;
+            cursor: pointer;
+        }
+        #speedSlider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #2563eb;
+            border: 2px solid #60a5fa;
+            cursor: pointer;
+        }
+        #speedSlider::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #2563eb;
+            border: 2px solid #60a5fa;
+            cursor: pointer;
         }
         .controls button {
             background: #2a2a2a;
@@ -136,6 +176,7 @@
     <div id="inspector">
         <span class="close" id="inspectorClose">×</span>
         <h3><span class="swatch" id="insSwatch"></span> Goblet <span id="insId"></span></h3>
+        <div class="row"><span>Name</span><span id="insName"></span></div>
         <div class="row"><span>Generation</span><span id="insGen"></span></div>
         <div class="row"><span>Gender</span><span id="insGender"></span></div>
         <div class="row"><span>Age</span><span id="insAge"></span></div>
@@ -157,32 +198,30 @@
         // ============================================================================
         const WORLD_WIDTH = 1700;
         const WORLD_HEIGHT = 1300;
-        const HUNGER_DECAY_RATE = 0.55;
-        const THIRST_DECAY_RATE = 0.4;
-        const HUNGER_THRESHOLD = 40;
-        const THIRST_THRESHOLD = 40;
-        const APPLE_REGROW_INTERVAL = 5000;
-        const APPLE_REGROW_SECONDS = 3;
+        const HUNGER_DECAY_RATE = 0.7;
+        const THIRST_DECAY_RATE = 0.5;
+        const HUNGER_THRESHOLD = 55;
+        const THIRST_THRESHOLD = 55;
+        const APPLE_REGROW_SECONDS = 20;
         const MAX_APPLES_PER_BUSH = 3;
         const GOBLET_SIZE = 24;
         const BUSH_SIZE = 60;
         const BERRY_SIZE = 50;
         const WANDER_FORCE = 0.5;
-        const SEEK_FORCE = 1.0;
         const EAT_DURATION = 1.0;
         const DRINK_DURATION = 1.0;
         const MATE_DURATION = 3.0;
         
         // Reproduction constants
-        const FEMALE_REPRO_THRESHOLD = 60;
-        const MALE_REPRO_THRESHOLD = 50;
+        const FEMALE_REPRO_THRESHOLD = 75;
+        const MALE_REPRO_THRESHOLD = 75;
         const MIN_CHILD_SIZE = 6;
         const MAX_CHILD_SIZE = 10;
-        const REPRO_COOLDOWN = 4;
+        const REPRO_COOLDOWN = 10;
         const GROW_TIME_SECONDS = 200;
         const EAT_GROWTH_BONUS = 15;
-        const REPRO_MAX_AGE = 5000;
-        const AGING_RATE = 0.000075;
+        const REPRO_MAX_AGE = 2500;
+        const AGING_RATE = 0.1;
         const AGING_FLOOR = 0.15;
         
         const BERRY_POSITIONS = [
@@ -201,11 +240,14 @@
         let growingBushes = [];
         let pendingPoops = [];
         let lakes = [];
-        const POOP_DELAY = 50;
-        const POOP_SPROUT_CHANCE = 0.1;
-        const BUSH_STAGE_DURATION = 150;
+        const POOP_DELAY = 70;
+        const POOP_SPROUT_CHANCE = 0.33;
+        // A poop can only sprout if no other bush (grown OR still growing) is
+        // within this many world-units. Raise it to spread bushes out more,
+        // lower it to let them cluster. Measured center-to-center.
+        const BUSH_MIN_SPACING = 65;
+        const BUSH_STAGE_DURATION = 20;
         const BUSH_STAGES = ['poop', 'bush1', 'bush2', 'bush3', 'bush4'];
-        const POOP_SIZE = 20;
         const GROWING_BUSH_SIZES = { poop: 20, bush1: 25, bush2: 35, bush3: 45, bush4: 60 };
         let gameTime = 0;
         let nextGobletId = 1;
@@ -231,25 +273,37 @@
             humanSkin: null
         };
 
+        // Goblets only render ~30px on screen, so tinting at the source 800x800
+        // wasted ~2.5MB per color. Cap the tinted canvas to this size to keep
+        // the cache tiny (~64KB per entry) — otherwise accumulating unique
+        // mutated colors blew memory into the gigabytes and caused GC lag.
+        const TINT_SIZE = 128;
         function tintSilhouette(img, color) {
             let w = img.naturalWidth || img.width;
             let h = img.naturalHeight || img.height;
+            let scale = Math.min(1, TINT_SIZE / Math.max(w, h, 1));
+            let ow = Math.max(1, Math.round(w * scale));
+            let oh = Math.max(1, Math.round(h * scale));
             let off = document.createElement('canvas');
-            off.width = w;
-            off.height = h;
+            off.width = ow;
+            off.height = oh;
             let octx = off.getContext('2d');
-            octx.drawImage(img, 0, 0, w, h);
+            octx.drawImage(img, 0, 0, ow, oh);
             octx.globalCompositeOperation = 'source-in';
             octx.fillStyle = color;
-            octx.fillRect(0, 0, w, h);
+            octx.fillRect(0, 0, ow, oh);
             return off;
         }
 
         let skinCache = {};
         function getTintedSkin(color) {
-            let key = (color.r | 0) + ',' + (color.g | 0) + ',' + (color.b | 0);
+            // Quantize to the nearest 8 per channel so near-identical mutated
+            // shades share one cached canvas — bounds the cache to a few dozen
+            // entries instead of one per goblet.
+            let qr = (color.r | 0) & ~7, qg = (color.g | 0) & ~7, qb = (color.b | 0) & ~7;
+            let key = qr + ',' + qg + ',' + qb;
             if (!skinCache[key]) {
-                skinCache[key] = tintSilhouette(assets.humanSkin, colorToCss(color));
+                skinCache[key] = tintSilhouette(assets.humanSkin, `rgb(${qr},${qg},${qb})`);
             }
             return skinCache[key];
         }
@@ -337,7 +391,7 @@
         // ============================================================================
         // GENETICS
         // ============================================================================
-        const ADULT_SIZE_MIN = 18, ADULT_SIZE_MAX = 30;
+        const ADULT_SIZE_MIN = 18, ADULT_SIZE_MAX = 50;
         const SPEED_REF = 55;
         const SIZE_REF  = 24;
         
@@ -372,19 +426,48 @@
         }
 
         const SPAWN_COLORS = [
-            { r: 220, g: 30,  b: 30  },
-            { r: 30,  g: 180, b: 30  },
-            { r: 30,  g: 60,  b: 220 }
+            { r: 220, g: 30,  b: 30  },  // red   - faster
+            { r: 30,  g: 180, b: 30  },  // green - smallest
+            { r: 30,  g: 60,  b: 220 }   // blue  - keener sight
         ];
         function colorToCss(c) { return `rgb(${c.r|0}, ${c.g|0}, ${c.b|0})`; }
 
+        // Family names for the founding goblets. These act like surnames:
+        // a child inherits its father's name.
+        const FAMILY_NAMES = [
+            "Alderson", "Beckson", "Colverson", "Drilson", "Emserson",
+            "Falkson", "Grayson", "Helmson", "Iverson", "Jarveson",
+            "Kempson", "Lightson", "Marlson", "Nelsterson", "Ollison",
+            "Pemberson", "Quinterson", "Ravenson", "Silverson", "Thoreson",
+            "Ulterson", "Valtson", "Welderson", "Xaverson", "Yarlson",
+            "Zepherson", "Asherson", "Brenneson", "Chalkson", "Dantson",
+            "Ellerson", "Fireson", "Greenerson", "Harperson", "Inderson",
+            "Jackerson", "Kairson", "Landerson", "Midson", "Norderson"
+        ];
+
         function createGenes() {
-            let base = SPAWN_COLORS[Math.floor(Math.random() * SPAWN_COLORS.length)];
+            let idx = Math.floor(Math.random() * SPAWN_COLORS.length);
+            let base = SPAWN_COLORS[idx];
+
+            // baseline stat ranges
+            let sightRange = 80 + Math.random() * 40;   // [80, 120]
+            let speed      = 40 + Math.random() * 30;   // [40, 70]
+            let size = ADULT_SIZE_MIN + Math.random() * (ADULT_SIZE_MAX - ADULT_SIZE_MIN); // [18, 50]
+
+            // colour-specific spawn qualities
+            if (idx === 0) {          // red: higher speed
+                speed = 70 + Math.random() * 30;                    // [70, 100]
+            } else if (idx === 1) {   // green: smallest size
+                size = ADULT_SIZE_MIN + Math.random() * 10;         // [18, 28]
+            } else if (idx === 2) {   // blue: higher viewing range
+                sightRange = 130 + Math.random() * 40;              // [130, 170]
+            }
+
             return {
                 color: { r: base.r, g: base.g, b: base.b },
-                sightRange: 80 + Math.random() * 40,
-                speed: 40 + Math.random() * 30,
-                size: ADULT_SIZE_MIN + Math.random() * (ADULT_SIZE_MAX - ADULT_SIZE_MIN)
+                sightRange: sightRange,
+                speed: speed,
+                size: size
             };
         }
 
@@ -413,42 +496,40 @@
         // ============================================================================
         // WORLD SETUP
         // ============================================================================
-        function spawnSpread(count, padding, minDist, existing) {
-            let points = [];
-            for (let i = 0; i < count; i++) {
-                let best = null, bestScore = -1;
-                for (let attempt = 0; attempt < 200; attempt++) {
-                    let x = padding + Math.random() * (WORLD_WIDTH - padding * 2);
-                    let y = padding + Math.random() * (WORLD_HEIGHT - padding * 2);
-                    let nearest = Infinity;
-                    for (let p of points) nearest = Math.min(nearest, Math.hypot(x - p.x, y - p.y));
-                    for (let p of existing) nearest = Math.min(nearest, Math.hypot(x - p.x, y - p.y));
-                    if (nearest >= minDist && nearest > bestScore) {
-                        best = { x, y };
-                        bestScore = nearest;
-                    }
-                }
-                if (!best) {
-                    best = { x: padding + Math.random() * (WORLD_WIDTH - padding * 2), y: padding + Math.random() * (WORLD_HEIGHT - padding * 2) };
-                }
-                points.push(best);
-            }
-            return points;
-        }
-
         function setupWorld() {
-            let lakeCount = 3 + Math.floor(Math.random() * 4);
-            let lakePoints = spawnSpread(lakeCount, 80, 150, []);
-            lakes = lakePoints.map(p => ({ x: p.x, y: p.y, radius: 50 + Math.random() * 20 }));
+            // Fixed layout: 5 lakes — one in each corner and one in the middle.
+            const LAKE_RADIUS = 75;
+            let lakePoints = [
+                { x: 240,  y: 240  },  // top-left
+                { x: WORLD_WIDTH - 240, y: 240 },              // top-right
+                { x: 240,  y: WORLD_HEIGHT - 240 },            // bottom-left
+                { x: WORLD_WIDTH - 240, y: WORLD_HEIGHT - 240 }, // bottom-right
+                { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 }     // middle
+            ];
+            lakes = lakePoints.map(p => ({ x: p.x, y: p.y, radius: LAKE_RADIUS }));
 
-            let bushPoints = spawnSpread(6, 60, 120, lakes);
-            bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0 }));
+            // Fixed layout: 4 bushes at the edge midpoints (top, bottom, left,
+            // right) plus 1 bush in each map corner.
+            const CB = 90;  // corner bush inset from the map edge
+            let bushPoints = [
+                { x: WORLD_WIDTH / 2, y: 240 },                 // top
+                { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT - 240 },  // bottom
+                { x: 240, y: WORLD_HEIGHT / 2 },                // left
+                { x: WORLD_WIDTH - 240, y: WORLD_HEIGHT / 2 },  // right
+                { x: CB, y: CB },                               // top-left corner
+                { x: WORLD_WIDTH - CB, y: CB },                 // top-right corner
+                { x: CB, y: WORLD_HEIGHT - CB },                // bottom-left corner
+                { x: WORLD_WIDTH - CB, y: WORLD_HEIGHT - CB }   // bottom-right corner
+            ];
+            bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0, picked: 0, bornAt: 0 }));
 
-            for (let i = 0; i < 8; i++) spawnGoblet('male');
-            for (let i = 0; i < 8; i++) spawnGoblet('female');
+            // Each founder gets a unique family name, passed down the male line.
+            let nameIdx = 0;
+            for (let i = 0; i < 250; i++) spawnGoblet('male', FAMILY_NAMES[nameIdx++ % FAMILY_NAMES.length]);
+            for (let i = 0; i < 250; i++) spawnGoblet('female', FAMILY_NAMES[nameIdx++ % FAMILY_NAMES.length]);
         }
 
-        function spawnGoblet(gender) {
+        function spawnGoblet(gender, name) {
             let x, y, valid;
             let attempts = 0;
             do {
@@ -481,21 +562,18 @@
                 lastWanderChange: gameTime,
                 isActing: false,
                 actionTimer: 0,
-                stuckCounter: 0,
                 reproCooldown: 0,
                 bobPhase: Math.random() * Math.PI * 2,
                 isGrown: true,
                 restUntil: undefined,
                 id: nextGobletId++,
+                name: name,
                 generation: 1,
                 gender: gender || (Math.random() < 0.5 ? 'male' : 'female'),
                 parents: [],
                 age: 0,
                 baseSightRange: genes.sightRange,
                 baseSpeed: genes.speed,
-                // Track last few positions to detect true stuckness
-                posHistory: [],
-                stuckFrames: 0,
                 berriesEaten: 0
             };
             goblets.push(goblet);
@@ -605,28 +683,45 @@
                 lastWanderChange: gameTime,
                 isActing: false,
                 actionTimer: 0,
-                stuckCounter: 0,
                 reproCooldown: 0,
                 bobPhase: Math.random() * Math.PI * 2,
                 isGrown: false,
                 restUntil: undefined,
                 id: nextGobletId++,
+                // Surname passes down the father (male) line.
+                name: (goblet1.gender === 'male' ? goblet1.name : goblet2.name),
                 generation: Math.max(goblet1.generation, goblet2.generation) + 1,
                 gender: Math.random() < 0.5 ? 'male' : 'female',
                 parents: [goblet1.id, goblet2.id],
                 age: 0,
                 baseSightRange: childGenes.sightRange,
                 baseSpeed: childGenes.speed,
-                posHistory: [],
-                stuckFrames: 0,
                 berriesEaten: 0
             };
 
             goblets.push(child);
         }
 
+        // True if a new bush is allowed to sprout at (x, y): no existing bush,
+        // and no other still-growing bush that will sprout, within BUSH_MIN_SPACING.
+        function bushSpotClear(x, y) {
+            for (let b of bushes) {
+                if (Math.hypot(x - b.x, y - b.y) < BUSH_MIN_SPACING) return false;
+            }
+            for (let gb of growingBushes) {
+                if (gb.willSprout && Math.hypot(x - gb.x, y - gb.y) < BUSH_MIN_SPACING) return false;
+            }
+            return true;
+        }
+
         function agingFactor(age) {
-            return Math.max(AGING_FLOOR, 1 - age * AGING_RATE);
+            // Stats stay at full strength for the whole fertile lifespan; only
+            // once a goblet becomes infertile (age >= REPRO_MAX_AGE) do its
+            // sight and speed begin to decline. This prevents aging from
+            // dragging down the genes of still-breeding adults (and, via mate
+            // choice, their offspring).
+            if (age < REPRO_MAX_AGE) return 1;
+            return Math.max(AGING_FLOOR, 1 - (age - REPRO_MAX_AGE) * AGING_RATE);
         }
 
         // ============================================================================
@@ -714,40 +809,6 @@
         }
 
         // Check if goblet is truly stuck (hasn't moved in a while)
-        function isTrulyStuck(goblet) {
-            // Store position history (every few frames)
-            let now = gameTime;
-            if (!goblet._lastPosLog || now - goblet._lastPosLog > 2) {
-                goblet._lastPosLog = now;
-                if (!goblet._posLog) goblet._posLog = [];
-                goblet._posLog.push({x: goblet.x, y: goblet.y, time: now});
-                if (goblet._posLog.length > 10) goblet._posLog.shift();
-            }
-            
-            if (goblet._posLog && goblet._posLog.length >= 5) {
-                // Check if all recent positions are very close
-                let avgX = 0, avgY = 0;
-                for (let p of goblet._posLog) {
-                    avgX += p.x;
-                    avgY += p.y;
-                }
-                avgX /= goblet._posLog.length;
-                avgY /= goblet._posLog.length;
-                
-                let maxDist = 0;
-                for (let p of goblet._posLog) {
-                    let d = Math.hypot(p.x - avgX, p.y - avgY);
-                    if (d > maxDist) maxDist = d;
-                }
-                
-                // If all positions are within 5px over the last 2 seconds, we're stuck
-                if (maxDist < 5 && goblet._posLog.length >= 5) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         // ============================================================================
         // UPDATE LOOP
         // ============================================================================
@@ -802,7 +863,14 @@
                     }
                 }
 
-                if (canReproduce(goblet)) {
+                // Throttle the O(n) mate scan: at most ~once per sim-second,
+                // staggered per goblet. Scanning every substep made this an
+                // O(n^2)-per-step hot path that tanked FPS at high speed / large
+                // populations. Mating takes 3s + a 10s cooldown, so a ~1s search
+                // cadence is more than responsive enough.
+                if (canReproduce(goblet) && goblet.state !== 'seekingMate' &&
+                    (goblet.nextMateSearch === undefined || gameTime >= goblet.nextMateSearch)) {
+                    goblet.nextMateSearch = gameTime + 0.75 + Math.random() * 0.5;
                     let mate = findMate(goblet);
                     if (mate) {
                         goblet.state = 'seekingMate';
@@ -828,20 +896,41 @@
                     }
                 }
 
-                if (goblet.thirst < THIRST_THRESHOLD && goblet.state !== 'seekingWater') {
-                    goblet.state = 'seekingWater';
-                    goblet.targetX = null;
-                    goblet.targetY = null;
-                    goblet.mateTarget = null;
-                } else if (goblet.hunger < HUNGER_THRESHOLD && goblet.state !== 'seekingFood') {
-                    goblet.state = 'seekingFood';
-                    goblet.targetX = null;
-                    goblet.targetY = null;
-                    goblet.mateTarget = null;
-                } else if (goblet.hunger >= HUNGER_THRESHOLD && goblet.thirst >= THIRST_THRESHOLD && goblet.state !== 'seekingMate') {
-                    goblet.state = 'idle';
-                    goblet.targetX = null;
-                    goblet.targetY = null;
+                let needWater = goblet.thirst < THIRST_THRESHOLD;
+                let needFood  = goblet.hunger < HUNGER_THRESHOLD;
+
+                // Stay committed to the current errand until that need is met,
+                // so a goblet that needs BOTH doesn't flip-flop between food and
+                // water every frame and get stuck between them.
+                let busyWater = goblet.state === 'seekingWater' && needWater;
+                let busyFood  = goblet.state === 'seekingFood'  && needFood;
+
+                if (!busyWater && !busyFood) {
+                    if (needWater || needFood) {
+                        // Go for the MORE urgent need first (lower stat wins);
+                        // if both are equally low, pick one at random.
+                        let goWater;
+                        if (needWater && needFood) {
+                            if (goblet.thirst < goblet.hunger)      goWater = true;
+                            else if (goblet.hunger < goblet.thirst) goWater = false;
+                            else                                    goWater = Math.random() < 0.5;
+                        } else {
+                            goWater = needWater;
+                        }
+                        let desired = goWater ? 'seekingWater' : 'seekingFood';
+                        if (goblet.state !== desired) {
+                            goblet.state = desired;
+                            goblet.targetX = null;
+                            goblet.targetY = null;
+                            goblet.commitX = null;
+                            goblet.commitY = null;
+                            goblet.mateTarget = null;
+                        }
+                    } else if (goblet.state !== 'seekingMate') {
+                        goblet.state = 'idle';
+                        goblet.targetX = null;
+                        goblet.targetY = null;
+                    }
                 }
 
                 updateGobletBehavior(goblet, deltaTime);
@@ -854,6 +943,13 @@
                 if (gameTime - bush.lastRegrow > APPLE_REGROW_SECONDS && bush.apples < MAX_APPLES_PER_BUSH) {
                     bush.apples++;
                     bush.lastRegrow = gameTime;
+                }
+            }
+
+            // Bushes die of old age after 2500s, regardless of berries left.
+            for (let i = bushes.length - 1; i >= 0; i--) {
+                if (gameTime - (bushes[i].bornAt || 0) >= 3500) {
+                    bushes.splice(i, 1);
                 }
             }
 
@@ -873,6 +969,8 @@
                     px = Math.max(20, Math.min(WORLD_WIDTH - 20, px));
                     py = Math.max(20, Math.min(WORLD_HEIGHT - 20, py));
                     let willSprout = Math.random() < POOP_SPROUT_CHANCE;
+                    // Block sprouting if another bush (grown or growing) is too close.
+                    if (willSprout && !bushSpotClear(px, py)) willSprout = false;
                     growingBushes.push({ x: px, y: py, stage: 0, stageTime: gameTime, willSprout: willSprout });
                     pendingPoops.splice(i, 1);
                 }
@@ -888,7 +986,7 @@
                     gb.stage++;
                     gb.stageTime = gameTime;
                     if (gb.stage >= BUSH_STAGES.length - 1) {
-                        bushes.push({ x: gb.x, y: gb.y, radius: 30, apples: 0, lastRegrow: gameTime });
+                        bushes.push({ x: gb.x, y: gb.y, radius: 30, apples: 0, lastRegrow: gameTime, picked: 0, bornAt: gameTime });
                         growingBushes.splice(i, 1);
                     }
                 }
@@ -917,24 +1015,31 @@
         }
 
         function seekResource(goblet, deltaTime, kind) {
-            let best = null, bestDist = goblet.genes.sightRange;
+            // Detection is based on distance to the resource's SURFACE (edge),
+            // not its center — otherwise a goblet standing at the water's edge,
+            // with the lake filling its sight circle, wouldn't register it as
+            // water because the lake's center is beyond its sight range.
+            let sr = goblet.genes.sightRange;
+            let best = null, bestEdge = sr, bestCenter = 0;
             if (kind === 'water') {
                 for (let lake of lakes) {
                     let d = Math.hypot(goblet.x - lake.x, goblet.y - lake.y);
-                    if (d < bestDist) { bestDist = d; best = lake; }
+                    let edge = d - lake.radius;
+                    if (edge < bestEdge) { bestEdge = edge; bestCenter = d; best = lake; }
                 }
             } else {
                 for (let bush of bushes) {
                     if (bush.apples <= 0) continue;
                     let d = Math.hypot(goblet.x - bush.x, goblet.y - bush.y);
-                    if (d < bestDist) { bestDist = d; best = bush; }
+                    let edge = d - bush.radius;
+                    if (edge < bestEdge) { bestEdge = edge; bestCenter = d; best = bush; }
                 }
             }
 
             if (best) {
                 goblet.commitX = best.x;
                 goblet.commitY = best.y;
-                goblet.commitBestDist = bestDist;
+                goblet.commitBestDist = bestCenter;
                 goblet.commitProgressTime = gameTime;
             } else if (goblet.commitX != null) {
                 let dc = Math.hypot(goblet.x - goblet.commitX, goblet.y - goblet.commitY);
@@ -1010,6 +1115,11 @@
             }
 
             let speed = goblet.genes.speed;
+            // Desperation boost: at the last 10% of hunger or thirst, a goblet
+            // sprints (1.75x) until it replenishes (stat rises above 10) or dies.
+            if (goblet.hunger <= 10 || goblet.thirst <= 10) {
+                speed *= 1.75;
+            }
             let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
 
             let heading;
@@ -1104,6 +1214,7 @@
                 let dist = Math.hypot(goblet.x - bush.x, goblet.y - bush.y);
                 if (dist < BUSH_SIZE / 2 + GOBLET_SIZE / 2 && bush.apples > 0) {
                     bush.apples--;
+                    bush.picked = (bush.picked || 0) + 1;
                     goblet.hunger = 100;
                     goblet.berriesEaten++;
                     if (goblet.berriesEaten >= 3) {
@@ -1128,6 +1239,11 @@
                     goblet.commitX = null;
                     goblet.commitY = null;
                     bush.lastRegrow = gameTime;
+                    // a bush is exhausted after its berries are picked 10 times
+                    if (bush.picked >= 20) {
+                        let bi = bushes.indexOf(bush);
+                        if (bi !== -1) bushes.splice(bi, 1);
+                    }
                     return;
                 }
             }
@@ -1422,6 +1538,7 @@
             let c = g.genes.color;
             document.getElementById('insSwatch').style.background = colorToCss(c);
             document.getElementById('insId').textContent = '#' + g.id;
+            document.getElementById('insName').textContent = g.name || '—';
             document.getElementById('insGen').textContent = g.generation;
             document.getElementById('insGender').textContent =
                 g.gender === 'female' ? '♀ female' : '♂ male';
@@ -1474,29 +1591,45 @@
         // SIMULATION SPEED CONTROLS
         // ============================================================================
         let simSpeed = 1;
-        const SPEED_OPTIONS = [1, 2, 4, 6, 10, 20, 100];
+        const SPEED_MIN = 1;
+        const SPEED_MAX = 1000;
         const FIXED_DT = 1 / 60;
         const MAX_STEPS_PER_FRAME = 120;
 
         function buildSpeedControls() {
             let container = document.getElementById('controls');
             container.innerHTML = '';
-            for (let s of SPEED_OPTIONS) {
-                let btn = document.createElement('button');
-                btn.textContent = s + 'x';
-                btn.dataset.speed = s;
-                if (s === simSpeed) btn.classList.add('active');
-                btn.addEventListener('click', () => setSimSpeed(s));
-                container.appendChild(btn);
-            }
+
+            let label = document.createElement('span');
+            label.className = 'speed-caption';
+            label.textContent = 'Speed';
+
+            let slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = SPEED_MIN;
+            slider.max = SPEED_MAX;
+            slider.step = 1;
+            slider.value = simSpeed;
+            slider.id = 'speedSlider';
+            slider.addEventListener('input', () => setSimSpeed(Number(slider.value)));
+
+            let readout = document.createElement('span');
+            readout.className = 'speed-readout';
+            readout.id = 'speedReadout';
+            readout.textContent = simSpeed + 'x';
+
+            container.appendChild(label);
+            container.appendChild(slider);
+            container.appendChild(readout);
         }
 
         function setSimSpeed(s) {
-            simSpeed = s;
-            document.getElementById('speedLabel').textContent = s + 'x';
-            for (let btn of document.querySelectorAll('#controls button')) {
-                btn.classList.toggle('active', Number(btn.dataset.speed) === s);
-            }
+            simSpeed = Math.max(SPEED_MIN, Math.min(SPEED_MAX, Math.round(s)));
+            document.getElementById('speedLabel').textContent = simSpeed + 'x';
+            let readout = document.getElementById('speedReadout');
+            if (readout) readout.textContent = simSpeed + 'x';
+            let slider = document.getElementById('speedSlider');
+            if (slider && Number(slider.value) !== simSpeed) slider.value = simSpeed;
         }
 
         // ============================================================================
