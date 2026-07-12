@@ -148,6 +148,70 @@
             line-height: 1;
         }
         #inspector .close:hover { color: #fff; }
+        #graphsBtn {
+            position: fixed;
+            top: 92px;
+            left: 10px;
+            z-index: 10;
+            background: #2a2a2a;
+            color: #eee;
+            border: 1px solid #555;
+            border-radius: 5px;
+            padding: 6px 14px;
+            font-size: 14px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        #graphsBtn:hover { background: #3a3a3a; }
+        #graphsBtn.active {
+            background: #2563eb;
+            border-color: #60a5fa;
+            color: #fff;
+        }
+        #graphPanel {
+            position: fixed;
+            top: 130px;
+            left: 10px;
+            width: 564px;
+            background: rgba(0,0,0,0.82);
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 12px;
+            z-index: 10;
+            display: none;
+        }
+        #graphPanel .graph-title {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        #graphCanvas {
+            display: block;
+            width: 540px;
+            height: 380px;
+            background: #141414;
+            border-radius: 4px;
+        }
+        #graphLegend {
+            margin-top: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+        #graphLegend .leg {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            margin-right: 12px;
+            white-space: nowrap;
+        }
+        #graphLegend .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            display: inline-block;
+        }
         #pausedTag {
             position: fixed;
             top: 10px;
@@ -170,6 +234,12 @@
         <div>Population: <span id="population">0</span></div>
         <div>Time: <span id="time">0s</span></div>
         <div>Speed: <span id="speedLabel">1x</span></div>
+    </div>
+    <button id="graphsBtn">Graphs</button>
+    <div id="graphPanel">
+        <div class="graph-title">Population by family name</div>
+        <canvas id="graphCanvas" width="540" height="380"></canvas>
+        <div id="graphLegend"></div>
     </div>
     <div class="controls" id="controls"></div>
     <div id="pausedTag">⏸ PAUSED (space)</div>
@@ -199,7 +269,7 @@
         const WORLD_WIDTH = 1700;
         const WORLD_HEIGHT = 1300;
         const HUNGER_DECAY_RATE = 0.7;
-        const THIRST_DECAY_RATE = 0.5;
+        const THIRST_DECAY_RATE = 0.7;
         const HUNGER_THRESHOLD = 55;
         const THIRST_THRESHOLD = 55;
         const APPLE_REGROW_SECONDS = 20;
@@ -639,8 +709,10 @@
 
             let childGenes = inheritGenes(goblet1, goblet2);
             
+            // Spawn the baby right on top of its parents (their midpoint), with
+            // just a tiny random jitter so it isn't perfectly stacked on them.
             let angle = Math.random() * Math.PI * 2;
-            let distance = 30 + Math.random() * 20;
+            let distance = Math.random() * 6;
             let x = (goblet1.x + goblet2.x) / 2 + Math.cos(angle) * distance;
             let y = (goblet1.y + goblet2.y) / 2 + Math.sin(angle) * distance;
             
@@ -1637,6 +1709,122 @@
         // ============================================================================
         let lastTime = performance.now();
 
+        // ============================================================================
+        // FAMILY-NAME POPULATION GRAPH
+        // ============================================================================
+        let graphVisible = false;
+        let graphHistory = [];              // [{ t, counts:{name:n} }]
+        let lastGraphSample = -Infinity;
+        const GRAPH_SAMPLE_INTERVAL = 8;    // sim-seconds between samples
+        const GRAPH_MAX_POINTS = 400;
+
+        // Deterministic, evenly-spread colour for a surname.
+        const nameColorCache = {};
+        function nameColor(name) {
+            if (nameColorCache[name]) return nameColorCache[name];
+            let h = 0;
+            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+            let hue = ((h % 360) + 360) % 360;
+            let c = `hsl(${hue}, 70%, 55%)`;
+            nameColorCache[name] = c;
+            return c;
+        }
+
+        function sampleGraph() {
+            if (gameTime - lastGraphSample < GRAPH_SAMPLE_INTERVAL) return;
+            lastGraphSample = gameTime;
+            let counts = {};
+            for (let g of goblets) {
+                let n = g.name || '(none)';
+                counts[n] = (counts[n] || 0) + 1;
+            }
+            graphHistory.push({ t: gameTime, counts });
+            if (graphHistory.length > GRAPH_MAX_POINTS) graphHistory.shift();
+        }
+
+        function drawGraph() {
+            let cv = document.getElementById('graphCanvas');
+            let gx = cv.getContext('2d');
+            let W = cv.width, H = cv.height;
+            gx.clearRect(0, 0, W, H);
+            gx.fillStyle = '#141414';
+            gx.fillRect(0, 0, W, H);
+
+            const padL = 28, padR = 8, padT = 8, padB = 16;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+
+            if (graphHistory.length < 2) {
+                gx.fillStyle = '#666';
+                gx.font = '12px Arial';
+                gx.fillText('Collecting data…', padL, padT + plotH / 2);
+                return;
+            }
+
+            let names = new Set();
+            let maxCount = 1;
+            for (let pt of graphHistory) {
+                for (let n in pt.counts) {
+                    names.add(n);
+                    if (pt.counts[n] > maxCount) maxCount = pt.counts[n];
+                }
+            }
+            let t0 = graphHistory[0].t;
+            let t1 = graphHistory[graphHistory.length - 1].t;
+            let tRange = Math.max(1, t1 - t0);
+
+            // axes
+            gx.strokeStyle = '#333';
+            gx.lineWidth = 1;
+            gx.beginPath();
+            gx.moveTo(padL, padT);
+            gx.lineTo(padL, padT + plotH);
+            gx.lineTo(padL + plotW, padT + plotH);
+            gx.stroke();
+            gx.fillStyle = '#888';
+            gx.font = '10px Arial';
+            gx.textAlign = 'right';
+            gx.fillText(String(maxCount), padL - 4, padT + 8);
+            gx.fillText('0', padL - 4, padT + plotH);
+            gx.textAlign = 'left';
+
+            let X = t => padL + ((t - t0) / tRange) * plotW;
+            let Y = c => padT + plotH - (c / maxCount) * plotH;
+
+            for (let name of names) {
+                gx.strokeStyle = nameColor(name);
+                gx.lineWidth = 1.5;
+                gx.beginPath();
+                let started = false;
+                for (let pt of graphHistory) {
+                    let c = pt.counts[name] || 0;
+                    let px = X(pt.t), py = Y(c);
+                    if (!started) { gx.moveTo(px, py); started = true; }
+                    else gx.lineTo(px, py);
+                }
+                gx.stroke();
+            }
+        }
+
+        function updateGraphLegend() {
+            let legend = document.getElementById('graphLegend');
+            let last = graphHistory.length ? graphHistory[graphHistory.length - 1].counts : {};
+            let entries = Object.keys(last).map(n => [n, last[n]]).sort((a, b) => b[1] - a[1]);
+            if (entries.length === 0) {
+                legend.innerHTML = '<span style="color:#666">No goblets</span>';
+                return;
+            }
+            legend.innerHTML = entries.map(([n, c]) =>
+                `<span class="leg"><span class="dot" style="background:${nameColor(n)}"></span>${n} (${c})</span>`
+            ).join('');
+        }
+
+        document.getElementById('graphsBtn').addEventListener('click', () => {
+            graphVisible = !graphVisible;
+            document.getElementById('graphPanel').style.display = graphVisible ? 'block' : 'none';
+            document.getElementById('graphsBtn').classList.toggle('active', graphVisible);
+            if (graphVisible) { drawGraph(); updateGraphLegend(); }
+        });
+
         function gameLoop() {
             let now = performance.now();
             let realDelta = (now - lastTime) / 1000;
@@ -1654,6 +1842,8 @@
 
             render();
             updateInspector();
+            sampleGraph();
+            if (graphVisible) { drawGraph(); updateGraphLegend(); }
             requestAnimationFrame(gameLoop);
         }
 
