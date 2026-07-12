@@ -173,6 +173,8 @@
             top: 130px;
             left: 10px;
             width: 564px;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
             background: rgba(0,0,0,0.82);
             border: 1px solid #444;
             border-radius: 8px;
@@ -191,6 +193,19 @@
             height: 380px;
             background: #141414;
             border-radius: 4px;
+        }
+        #infectedCanvas {
+            display: block;
+            width: 540px;
+            height: 150px;
+            background: #141414;
+            border-radius: 4px;
+        }
+        #infectedReadout {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #ef4444;
+            font-variant-numeric: tabular-nums;
         }
         #graphLegend {
             margin-top: 8px;
@@ -240,6 +255,9 @@
         <div class="graph-title">Population by family name</div>
         <canvas id="graphCanvas" width="540" height="380"></canvas>
         <div id="graphLegend"></div>
+        <div class="graph-title" style="margin-top:12px;">Infected</div>
+        <canvas id="infectedCanvas" width="540" height="150"></canvas>
+        <div id="infectedReadout"></div>
     </div>
     <div class="controls" id="controls"></div>
     <div id="pausedTag">⏸ PAUSED (space)</div>
@@ -260,6 +278,7 @@
         <div class="row"><span>Adult size</span><span id="insSize"></span></div>
         <div class="row"><span>Current size</span><span id="insCurSize"></span></div>
         <div class="row"><span>Gene score</span><span id="insScore"></span></div>
+        <div class="row"><span>Immunity</span><span id="insImmunity"></span></div>
     </div>
 
     <script>
@@ -454,6 +473,18 @@
                     assets.bush3.src = 'assets/bush3.png';
                     assets.bush3.onload = resolve;
                     assets.bush3.onerror = () => { console.warn('bush3.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.toxicberry = new Image();
+                    assets.toxicberry.src = 'assets/toxicberry.png';
+                    assets.toxicberry.onload = resolve;
+                    assets.toxicberry.onerror = () => { console.warn('toxicberry.png not found'); resolve(); };
+                }),
+                new Promise(resolve => {
+                    assets.disease = new Image();
+                    assets.disease.src = 'assets/disease.png';
+                    assets.disease.onload = resolve;
+                    assets.disease.onerror = () => { console.warn('disease.png not found'); resolve(); };
                 })
             ]);
         }
@@ -515,6 +546,17 @@
             "Jackerson", "Kairson", "Landerson", "Midson", "Norderson"
         ];
 
+        // ============================================================================
+        // DISEASE
+        // ============================================================================
+        const TOXIC_BUSH_CHANCE = 0.01;   // 1 in 100 bushes spawns toxic
+        const TOXIC_BUSH_MAX_PICKS = 3;   // toxic bush vanishes after 3 berries eaten
+        const SICK_DURATION = 250;        // seconds a goblet stays sick
+        const SICK_SPEED_MULT = 0.3;     // 0.25 speed debuff while sick
+        const BASE_DEATH_CHANCE = 0.8;    // 1-in-2 chance of dying from an infection
+        const IMMUNITY_GAIN = 0.01;        // survivors gain this much resistance (a gene)
+        const POOP_INFECT_RADIUS = 27;    // infectious-poop contagion range
+
         function createGenes() {
             let idx = Math.floor(Math.random() * SPAWN_COLORS.length);
             let base = SPAWN_COLORS[idx];
@@ -537,7 +579,8 @@
                 color: { r: base.r, g: base.g, b: base.b },
                 sightRange: sightRange,
                 speed: speed,
-                size: size
+                size: size,
+                immunity: 0   // disease resistance gene; rises when surviving illness
             };
         }
 
@@ -555,12 +598,32 @@
                 b: clamp(Math.round((c1.b + c2.b) / 2 + deviation(20)), 0, 255)
             };
 
+            // Immunity is inherited: a child of survivors carries their resistance.
+            let avgImmunity = ((parent1.genes.immunity || 0) + (parent2.genes.immunity || 0)) / 2;
+
             return {
                 color: color,
                 sightRange: Math.max(1, deviate(avgSight, 8)),
                 speed:      Math.max(1, deviate(avgSpeed, 5)),
-                size:       Math.max(1, deviate(avgSize, 3))
+                size:       Math.max(1, deviate(avgSize, 3)),
+                immunity:   clamp(avgImmunity, 0, BASE_DEATH_CHANCE)
             };
+        }
+
+        // Children conceived while a parent is sick suffer a randomized genetic
+        // DEBUFF — one stat gets worse. Magnitude has a heavy tail
+        // (Math.random()^3) so tiny debuffs are common and radical ones are rare.
+        // Returns a description for logging.
+        const PLAGUE_DEBUFF_MAX = 0.6;   // up to -60% (or equivalent) on the picked gene
+        function applyPlagueDebuff(genes) {
+            let pct = Math.pow(Math.random(), 3) * PLAGUE_DEBUFF_MAX;   // mostly small, rarely big
+            let pick = Math.floor(Math.random() * 4);
+            let gene;
+            if (pick === 0) { genes.sightRange = Math.max(1, genes.sightRange * (1 - pct)); gene = 'sight'; }
+            else if (pick === 1) { genes.speed = Math.max(1, genes.speed * (1 - pct)); gene = 'speed'; }
+            else if (pick === 2) { genes.size = genes.size * (1 + pct); gene = 'size'; } // bigger is worse
+            else { genes.immunity = clamp((genes.immunity || 0) - pct * BASE_DEATH_CHANCE, 0, BASE_DEATH_CHANCE); gene = 'immunity'; }
+            return { gene, pct };
         }
 
         // ============================================================================
@@ -591,7 +654,7 @@
                 { x: CB, y: WORLD_HEIGHT - CB },                // bottom-left corner
                 { x: WORLD_WIDTH - CB, y: WORLD_HEIGHT - CB }   // bottom-right corner
             ];
-            bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0, picked: 0, bornAt: 0 }));
+            bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0, picked: 0, bornAt: 0, toxic: Math.random() < TOXIC_BUSH_CHANCE, toxicPicked: 0 }));
 
             // Each founder gets a unique family name, passed down the male line.
             let nameIdx = 0;
@@ -644,10 +707,24 @@
                 age: 0,
                 baseSightRange: genes.sightRange,
                 baseSpeed: genes.speed,
-                berriesEaten: 0
+                berriesEaten: 0,
+                sick: false,
+                sickUntil: 0,
+                everInfected: false
             };
             goblets.push(goblet);
             return goblet;
+        }
+
+        // Infect a goblet: it becomes sick for SICK_DURATION. No effect if it's
+        // already sick, or if it has ever been infected before — surviving (or
+        // just catching) the disease once grants lifelong immunity to reinfection.
+        // Its fate (survive vs die) is rolled when the illness ends.
+        function infect(goblet) {
+            if (goblet.sick || goblet.everInfected) return;
+            goblet.sick = true;
+            goblet.everInfected = true;
+            goblet.sickUntil = gameTime + SICK_DURATION;
         }
 
         // ============================================================================
@@ -708,7 +785,13 @@
             goblet2.vx = 0; goblet2.vy = 0;
 
             let childGenes = inheritGenes(goblet1, goblet2);
-            
+
+            // Conceived during illness: the child inherits a randomized genetic
+            // debuff (one stat worsened; radical ones are rare).
+            if (goblet1.sick || goblet2.sick) {
+                applyPlagueDebuff(childGenes);
+            }
+
             // Spawn the baby right on top of its parents (their midpoint), with
             // just a tiny random jitter so it isn't perfectly stacked on them.
             let angle = Math.random() * Math.PI * 2;
@@ -768,10 +851,21 @@
                 age: 0,
                 baseSightRange: childGenes.sightRange,
                 baseSpeed: childGenes.speed,
-                berriesEaten: 0
+                berriesEaten: 0,
+                sick: false,
+                sickUntil: 0,
+                everInfected: false
             };
 
             goblets.push(child);
+
+            // Disease spreads through mating: a sick parent infects the partner
+            // and the newborn child.
+            if (goblet1.sick || goblet2.sick) {
+                infect(goblet1);
+                infect(goblet2);
+                infect(child);
+            }
         }
 
         // True if a new bush is allowed to sprout at (x, y): no existing bush,
@@ -918,6 +1012,20 @@
                     continue;
                 }
 
+                // Resolve illness: when the sick period ends, roll for death.
+                // Death chance is 0.5 reduced by the goblet's immunity gene.
+                // Survivors gain IMMUNITY_GAIN resistance (which their children
+                // inherit); the dead are removed.
+                if (goblet.sick && gameTime >= goblet.sickUntil) {
+                    let deathChance = Math.max(0, BASE_DEATH_CHANCE - (goblet.genes.immunity || 0));
+                    if (Math.random() < deathChance) {
+                        goblets.splice(i, 1);
+                        continue;
+                    }
+                    goblet.sick = false;
+                    goblet.genes.immunity = clamp((goblet.genes.immunity || 0) + IMMUNITY_GAIN, 0, BASE_DEATH_CHANCE);
+                }
+
                 goblet.age += deltaTime;
                 let af = agingFactor(goblet.age);
                 goblet.genes.sightRange = goblet.baseSightRange * af;
@@ -1043,7 +1151,7 @@
                     let willSprout = Math.random() < POOP_SPROUT_CHANCE;
                     // Block sprouting if another bush (grown or growing) is too close.
                     if (willSprout && !bushSpotClear(px, py)) willSprout = false;
-                    growingBushes.push({ x: px, y: py, stage: 0, stageTime: gameTime, willSprout: willSprout });
+                    growingBushes.push({ x: px, y: py, stage: 0, stageTime: gameTime, willSprout: willSprout, infectious: pp.infectious });
                     pendingPoops.splice(i, 1);
                 }
             }
@@ -1058,9 +1166,19 @@
                     gb.stage++;
                     gb.stageTime = gameTime;
                     if (gb.stage >= BUSH_STAGES.length - 1) {
-                        bushes.push({ x: gb.x, y: gb.y, radius: 30, apples: 0, lastRegrow: gameTime, picked: 0, bornAt: gameTime });
+                        bushes.push({ x: gb.x, y: gb.y, radius: 30, apples: 0, lastRegrow: gameTime, picked: 0, bornAt: gameTime, toxic: Math.random() < TOXIC_BUSH_CHANCE, toxicPicked: 0 });
                         growingBushes.splice(i, 1);
                     }
+                }
+            }
+
+            // Infectious poop: droppings from sick goblets infect any healthy
+            // goblet that wanders within POOP_INFECT_RADIUS while it's still poop.
+            for (let gb of growingBushes) {
+                if (!gb.infectious || gb.stage !== 0) continue;
+                for (let g of goblets) {
+                    if (g.sick) continue;
+                    if (Math.hypot(g.x - gb.x, g.y - gb.y) < POOP_INFECT_RADIUS) infect(g);
                 }
             }
         }
@@ -1192,6 +1310,10 @@
             if (goblet.hunger <= 10 || goblet.thirst <= 10) {
                 speed *= 1.75;
             }
+            // Sickness slows a goblet down (0.25 speed debuff).
+            if (goblet.sick) {
+                speed *= SICK_SPEED_MULT;
+            }
             let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
 
             let heading;
@@ -1291,7 +1413,7 @@
                     goblet.berriesEaten++;
                     if (goblet.berriesEaten >= 3) {
                         goblet.berriesEaten = 0;
-                        pendingPoops.push({ goblet: goblet, dropTime: gameTime + POOP_DELAY });
+                        pendingPoops.push({ goblet: goblet, dropTime: gameTime + POOP_DELAY, infectious: goblet.sick });
                     }
 
                     if (!goblet.isGrown) {
@@ -1311,8 +1433,18 @@
                     goblet.commitX = null;
                     goblet.commitY = null;
                     bush.lastRegrow = gameTime;
-                    // a bush is exhausted after its berries are picked 10 times
-                    if (bush.picked >= 20) {
+
+                    if (bush.toxic) {
+                        // Toxic berries infect the eater, and the bush is spent
+                        // after TOXIC_BUSH_MAX_PICKS berries are taken.
+                        infect(goblet);
+                        bush.toxicPicked = (bush.toxicPicked || 0) + 1;
+                        if (bush.toxicPicked >= TOXIC_BUSH_MAX_PICKS) {
+                            let bi = bushes.indexOf(bush);
+                            if (bi !== -1) bushes.splice(bi, 1);
+                        }
+                    } else if (bush.picked >= 20) {
+                        // a normal bush is exhausted after its berries are picked 20 times
                         let bi = bushes.indexOf(bush);
                         if (bi !== -1) bushes.splice(bi, 1);
                     }
@@ -1350,13 +1482,14 @@
                 }
                 ctx.restore();
 
+                let berryImg = bush.toxic ? assets.toxicberry : assets.berry;
                 for (let i = 0; i < bush.apples; i++) {
                     let pos = BERRY_POSITIONS[i];
                     let berryX = bush.x + pos.dx * BUSH_SIZE;
                     let berryY = bush.y + pos.dy * BUSH_SIZE;
                     ctx.save();
-                    if (assets.berry) {
-                        ctx.drawImage(assets.berry, berryX - BERRY_SIZE / 2, berryY - BERRY_SIZE / 2, BERRY_SIZE, BERRY_SIZE);
+                    if (berryImg) {
+                        ctx.drawImage(berryImg, berryX - BERRY_SIZE / 2, berryY - BERRY_SIZE / 2, BERRY_SIZE, BERRY_SIZE);
                     }
                     ctx.restore();
                 }
@@ -1525,6 +1658,13 @@
                     let hSize = 20;
                     ctx.drawImage(assets.hearts, goblet.x - hSize / 2, goblet.y - size / 2 - hSize - 4, hSize, hSize);
                 }
+
+                // Sick goblets wear the disease texture over their skin: same
+                // position and size as the body sprite, so it scales with the
+                // goblet and bobs up and down with it.
+                if (goblet.sick && assets.disease) {
+                    ctx.drawImage(assets.disease, dx, dy, size, size);
+                }
             }
 
             document.getElementById('population').textContent = goblets.length;
@@ -1616,9 +1756,10 @@
                 g.gender === 'female' ? '♀ female' : '♂ male';
             document.getElementById('insAge').textContent =
                 g.age.toFixed(0) + 's' + (g.age >= REPRO_MAX_AGE ? ' (infertile)' : '');
-            document.getElementById('insStatus').textContent =
-                g.isMating ? 'mating' : g.isActing ? 'busy' : (g.state === 'seekingWater' ? 'thirsty' :
+            let baseStatus = g.isMating ? 'mating' : g.isActing ? 'busy' : (g.state === 'seekingWater' ? 'thirsty' :
                 g.state === 'seekingFood' ? 'hungry' : g.state === 'seekingMate' ? 'seeking mate' : 'idle');
+            document.getElementById('insStatus').textContent =
+                g.sick ? `🤢 sick (${Math.max(0, g.sickUntil - gameTime).toFixed(0)}s) · ${baseStatus}` : baseStatus;
             document.getElementById('insHunger').textContent = g.hunger.toFixed(0) + '%';
             document.getElementById('insThirst').textContent = g.thirst.toFixed(0) + '%';
             document.getElementById('insColor').textContent = `${c.r|0}, ${c.g|0}, ${c.b|0}`;
@@ -1628,6 +1769,9 @@
             document.getElementById('insCurSize').textContent = g.currentSize.toFixed(1) +
                 (g.isGrown ? '' : ' (growing)');
             document.getElementById('insScore').textContent = geneQuality(g).toFixed(2);
+            let imm = g.genes.immunity || 0;
+            document.getElementById('insImmunity').textContent =
+                `${(imm * 100).toFixed(0)}% (death ${Math.max(0, BASE_DEATH_CHANCE - imm) * 100 | 0}%)`;
         }
 
         document.getElementById('inspectorClose').addEventListener('click', () => {
@@ -1734,11 +1878,13 @@
             if (gameTime - lastGraphSample < GRAPH_SAMPLE_INTERVAL) return;
             lastGraphSample = gameTime;
             let counts = {};
+            let infected = 0;
             for (let g of goblets) {
                 let n = g.name || '(none)';
                 counts[n] = (counts[n] || 0) + 1;
+                if (g.sick) infected++;
             }
-            graphHistory.push({ t: gameTime, counts });
+            graphHistory.push({ t: gameTime, counts, infected });
             if (graphHistory.length > GRAPH_MAX_POINTS) graphHistory.shift();
         }
 
@@ -1805,6 +1951,69 @@
             }
         }
 
+        // Single-line graph of the total number of infected goblets over time.
+        function drawInfectedGraph() {
+            let cv = document.getElementById('infectedCanvas');
+            let gx = cv.getContext('2d');
+            let W = cv.width, H = cv.height;
+            gx.clearRect(0, 0, W, H);
+            gx.fillStyle = '#141414';
+            gx.fillRect(0, 0, W, H);
+
+            const padL = 28, padR = 8, padT = 8, padB = 16;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+
+            // Live total of currently-infected goblets, shown below the graph.
+            let liveInfected = 0;
+            for (let g of goblets) if (g.sick) liveInfected++;
+            document.getElementById('infectedReadout').textContent =
+                'Currently infected: ' + liveInfected;
+
+            if (graphHistory.length < 2) {
+                gx.fillStyle = '#666';
+                gx.font = '12px Arial';
+                gx.fillText('Collecting data…', padL, padT + plotH / 2);
+                return;
+            }
+
+            let maxInf = 1;
+            for (let pt of graphHistory) {
+                let inf = pt.infected || 0;
+                if (inf > maxInf) maxInf = inf;
+            }
+            let t0 = graphHistory[0].t;
+            let t1 = graphHistory[graphHistory.length - 1].t;
+            let tRange = Math.max(1, t1 - t0);
+
+            gx.strokeStyle = '#333';
+            gx.lineWidth = 1;
+            gx.beginPath();
+            gx.moveTo(padL, padT);
+            gx.lineTo(padL, padT + plotH);
+            gx.lineTo(padL + plotW, padT + plotH);
+            gx.stroke();
+            gx.fillStyle = '#888';
+            gx.font = '10px Arial';
+            gx.textAlign = 'right';
+            gx.fillText(String(maxInf), padL - 4, padT + 8);
+            gx.fillText('0', padL - 4, padT + plotH);
+            gx.textAlign = 'left';
+
+            let X = t => padL + ((t - t0) / tRange) * plotW;
+            let Y = c => padT + plotH - (c / maxInf) * plotH;
+
+            gx.strokeStyle = '#ef4444';
+            gx.lineWidth = 1.5;
+            gx.beginPath();
+            let started = false;
+            for (let pt of graphHistory) {
+                let px = X(pt.t), py = Y(pt.infected || 0);
+                if (!started) { gx.moveTo(px, py); started = true; }
+                else gx.lineTo(px, py);
+            }
+            gx.stroke();
+        }
+
         function updateGraphLegend() {
             let legend = document.getElementById('graphLegend');
             let last = graphHistory.length ? graphHistory[graphHistory.length - 1].counts : {};
@@ -1822,7 +2031,7 @@
             graphVisible = !graphVisible;
             document.getElementById('graphPanel').style.display = graphVisible ? 'block' : 'none';
             document.getElementById('graphsBtn').classList.toggle('active', graphVisible);
-            if (graphVisible) { drawGraph(); updateGraphLegend(); }
+            if (graphVisible) { drawGraph(); drawInfectedGraph(); updateGraphLegend(); }
         });
 
         function gameLoop() {
@@ -1843,7 +2052,7 @@
             render();
             updateInspector();
             sampleGraph();
-            if (graphVisible) { drawGraph(); updateGraphLegend(); }
+            if (graphVisible) { drawGraph(); drawInfectedGraph(); updateGraphLegend(); }
             requestAnimationFrame(gameLoop);
         }
 
