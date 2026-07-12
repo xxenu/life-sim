@@ -172,9 +172,10 @@
             position: fixed;
             top: 130px;
             left: 10px;
-            width: 564px;
+            width: auto;
+            max-width: calc(100vw - 20px);
             max-height: calc(100vh - 200px);
-            overflow-y: auto;
+            overflow: auto;
             background: rgba(0,0,0,0.82);
             border: 1px solid #444;
             border-radius: 8px;
@@ -187,12 +188,27 @@
             font-weight: bold;
             margin-bottom: 8px;
         }
-        #graphCanvas {
+        .graph-row {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .graph-col {
+            display: flex;
+            flex-direction: column;
+        }
+        #graphCanvas, #sizeCanvas {
             display: block;
             width: 540px;
             height: 380px;
             background: #141414;
             border-radius: 4px;
+        }
+        #sizeReadout {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #22c55e;
+            font-variant-numeric: tabular-nums;
         }
         #infectedCanvas {
             display: block;
@@ -248,13 +264,23 @@
     <div class="info">
         <div>Population: <span id="population">0</span></div>
         <div>Time: <span id="time">0s</span></div>
+        <div>Year: <span id="year">0</span></div>
         <div>Speed: <span id="speedLabel">1x</span></div>
     </div>
     <button id="graphsBtn">Graphs</button>
     <div id="graphPanel">
-        <div class="graph-title">Population by family name</div>
-        <canvas id="graphCanvas" width="540" height="380"></canvas>
-        <div id="graphLegend"></div>
+        <div class="graph-row">
+            <div class="graph-col">
+                <div class="graph-title">Population by family name</div>
+                <canvas id="graphCanvas" width="540" height="380"></canvas>
+                <div id="graphLegend"></div>
+            </div>
+            <div class="graph-col">
+                <div class="graph-title">Average size</div>
+                <canvas id="sizeCanvas" width="540" height="380"></canvas>
+                <div id="sizeReadout"></div>
+            </div>
+        </div>
         <div class="graph-title" style="margin-top:12px;">Infected</div>
         <canvas id="infectedCanvas" width="540" height="150"></canvas>
         <div id="infectedReadout"></div>
@@ -740,8 +766,8 @@
 
             // Founders take the surname of their spawn colour, passed down the
             // male line thereafter.
-            for (let i = 0; i < 250; i++) spawnGoblet('male');
-            for (let i = 0; i < 250; i++) spawnGoblet('female');
+            for (let i = 0; i < 15; i++) spawnGoblet('male');
+            for (let i = 0; i < 15; i++) spawnGoblet('female');
         }
 
         function spawnGoblet(gender, name) {
@@ -1877,6 +1903,7 @@
 
             document.getElementById('population').textContent = goblets.length;
             document.getElementById('time').textContent = gameTime.toFixed(1) + 's';
+            document.getElementById('year').textContent = toYears(gameTime).toFixed(1);
         }
 
         // ============================================================================
@@ -2068,7 +2095,43 @@
         let graphHistory = [];              // [{ t, counts:{name:n} }]
         let lastGraphSample = -Infinity;
         const GRAPH_SAMPLE_INTERVAL = 8;    // sim-seconds between samples
-        const GRAPH_MAX_POINTS = 400;
+        const GRAPH_MAX_POINTS = 100000;    // effectively unlimited: keep full history
+
+        const SECONDS_PER_YEAR = 100;       // 100 sim-seconds = 1 year
+        function toYears(t) { return t / SECONDS_PER_YEAR; }
+
+        // Shared crypto-chart-style view window for all graphs.
+        //   graphViewSpan   = width of the visible window, in sample points
+        //                     (Infinity = fully zoomed out: first sample → now).
+        //   graphViewOffset = points from the newest sample to the window's right
+        //                     edge (0 = pinned to the live edge / present).
+        // Ctrl+scroll changes the zoom (span); plain scroll pans (offset).
+        const MIN_GRAPH_SPAN = 6;
+        let graphViewSpan = Infinity;
+        let graphViewOffset = 0;
+
+        // The slice of history currently in view, given span + offset.
+        function visibleHistory() {
+            let len = graphHistory.length;
+            let span = graphViewSpan === Infinity ? len : Math.min(graphViewSpan, len);
+            let end = len - graphViewOffset;
+            let start = Math.max(0, end - span);
+            return graphHistory.slice(start, Math.max(start, end));
+        }
+
+        // Year labels (100s = 1 year) along the bottom of a graph's visible window.
+        function drawYearAxis(gx, t0, t1, padL, plotW, padT, plotH) {
+            gx.fillStyle = '#888';
+            gx.font = '10px Arial';
+            let y = padT + plotH + 12;
+            gx.textAlign = 'left';
+            gx.fillText('Yr ' + toYears(t0).toFixed(1), padL, y);
+            gx.textAlign = 'center';
+            gx.fillText('Yr ' + toYears((t0 + t1) / 2).toFixed(1), padL + plotW / 2, y);
+            gx.textAlign = 'right';
+            gx.fillText('Yr ' + toYears(t1).toFixed(1), padL + plotW, y);
+            gx.textAlign = 'left';
+        }
 
         // Deterministic, evenly-spread colour for a surname.
         const nameColorCache = {};
@@ -2095,12 +2158,15 @@
             lastGraphSample = gameTime;
             let counts = {};
             let infected = 0;
+            let sizeSum = 0;
             for (let g of goblets) {
                 let n = g.name || '(none)';
                 counts[n] = (counts[n] || 0) + 1;
                 if (g.sick) infected++;
+                sizeSum += g.currentSize;
             }
-            graphHistory.push({ t: gameTime, counts, infected });
+            let avgSize = goblets.length ? sizeSum / goblets.length : 0;
+            graphHistory.push({ t: gameTime, counts, infected, avgSize });
             if (graphHistory.length > GRAPH_MAX_POINTS) graphHistory.shift();
         }
 
@@ -2115,7 +2181,8 @@
             const padL = 28, padR = 8, padT = 8, padB = 16;
             const plotW = W - padL - padR, plotH = H - padT - padB;
 
-            if (graphHistory.length < 2) {
+            let hist = visibleHistory();
+            if (hist.length < 2) {
                 gx.fillStyle = '#666';
                 gx.font = '12px Arial';
                 gx.fillText('Collecting data…', padL, padT + plotH / 2);
@@ -2124,14 +2191,14 @@
 
             let names = new Set();
             let maxCount = 1;
-            for (let pt of graphHistory) {
+            for (let pt of hist) {
                 for (let n in pt.counts) {
                     names.add(n);
                     if (pt.counts[n] > maxCount) maxCount = pt.counts[n];
                 }
             }
-            let t0 = graphHistory[0].t;
-            let t1 = graphHistory[graphHistory.length - 1].t;
+            let t0 = hist[0].t;
+            let t1 = hist[hist.length - 1].t;
             let tRange = Math.max(1, t1 - t0);
 
             // axes
@@ -2149,6 +2216,7 @@
             gx.fillText('0', padL - 4, padT + plotH);
             gx.textAlign = 'left';
 
+            drawYearAxis(gx, t0, t1, padL, plotW, padT, plotH);
             let X = t => padL + ((t - t0) / tRange) * plotW;
             let Y = c => padT + plotH - (c / maxCount) * plotH;
 
@@ -2157,7 +2225,7 @@
                 gx.lineWidth = 1.5;
                 gx.beginPath();
                 let started = false;
-                for (let pt of graphHistory) {
+                for (let pt of hist) {
                     let c = pt.counts[name] || 0;
                     let px = X(pt.t), py = Y(c);
                     if (!started) { gx.moveTo(px, py); started = true; }
@@ -2185,7 +2253,8 @@
             document.getElementById('infectedReadout').textContent =
                 'Currently infected: ' + liveInfected;
 
-            if (graphHistory.length < 2) {
+            let hist = visibleHistory();
+            if (hist.length < 2) {
                 gx.fillStyle = '#666';
                 gx.font = '12px Arial';
                 gx.fillText('Collecting data…', padL, padT + plotH / 2);
@@ -2193,12 +2262,12 @@
             }
 
             let maxInf = 1;
-            for (let pt of graphHistory) {
+            for (let pt of hist) {
                 let inf = pt.infected || 0;
                 if (inf > maxInf) maxInf = inf;
             }
-            let t0 = graphHistory[0].t;
-            let t1 = graphHistory[graphHistory.length - 1].t;
+            let t0 = hist[0].t;
+            let t1 = hist[hist.length - 1].t;
             let tRange = Math.max(1, t1 - t0);
 
             gx.strokeStyle = '#333';
@@ -2215,6 +2284,7 @@
             gx.fillText('0', padL - 4, padT + plotH);
             gx.textAlign = 'left';
 
+            drawYearAxis(gx, t0, t1, padL, plotW, padT, plotH);
             let X = t => padL + ((t - t0) / tRange) * plotW;
             let Y = c => padT + plotH - (c / maxInf) * plotH;
 
@@ -2222,8 +2292,76 @@
             gx.lineWidth = 1.5;
             gx.beginPath();
             let started = false;
-            for (let pt of graphHistory) {
+            for (let pt of hist) {
                 let px = X(pt.t), py = Y(pt.infected || 0);
+                if (!started) { gx.moveTo(px, py); started = true; }
+                else gx.lineTo(px, py);
+            }
+            gx.stroke();
+        }
+
+        // Single-line graph of the average goblet body size over time.
+        function drawSizeGraph() {
+            let cv = document.getElementById('sizeCanvas');
+            let gx = cv.getContext('2d');
+            let W = cv.width, H = cv.height;
+            gx.clearRect(0, 0, W, H);
+            gx.fillStyle = '#141414';
+            gx.fillRect(0, 0, W, H);
+
+            const padL = 28, padR = 8, padT = 8, padB = 16;
+            const plotW = W - padL - padR, plotH = H - padT - padB;
+
+            // Live average size shown below the graph.
+            let liveAvg = 0;
+            for (let g of goblets) liveAvg += g.currentSize;
+            liveAvg = goblets.length ? liveAvg / goblets.length : 0;
+            document.getElementById('sizeReadout').textContent =
+                'Average size: ' + liveAvg.toFixed(1);
+
+            let hist = visibleHistory();
+            if (hist.length < 2) {
+                gx.fillStyle = '#666';
+                gx.font = '12px Arial';
+                gx.fillText('Collecting data…', padL, padT + plotH / 2);
+                return;
+            }
+
+            let maxSize = 1;
+            for (let pt of hist) {
+                let s = pt.avgSize || 0;
+                if (s > maxSize) maxSize = s;
+            }
+            // round the top up to a tidy value so the line doesn't hug the ceiling
+            maxSize = Math.ceil(maxSize / 5) * 5;
+            let t0 = hist[0].t;
+            let t1 = hist[hist.length - 1].t;
+            let tRange = Math.max(1, t1 - t0);
+
+            gx.strokeStyle = '#333';
+            gx.lineWidth = 1;
+            gx.beginPath();
+            gx.moveTo(padL, padT);
+            gx.lineTo(padL, padT + plotH);
+            gx.lineTo(padL + plotW, padT + plotH);
+            gx.stroke();
+            gx.fillStyle = '#888';
+            gx.font = '10px Arial';
+            gx.textAlign = 'right';
+            gx.fillText(String(maxSize), padL - 4, padT + 8);
+            gx.fillText('0', padL - 4, padT + plotH);
+            gx.textAlign = 'left';
+
+            drawYearAxis(gx, t0, t1, padL, plotW, padT, plotH);
+            let X = t => padL + ((t - t0) / tRange) * plotW;
+            let Y = s => padT + plotH - (s / maxSize) * plotH;
+
+            gx.strokeStyle = '#22c55e';
+            gx.lineWidth = 1.5;
+            gx.beginPath();
+            let started = false;
+            for (let pt of hist) {
+                let px = X(pt.t), py = Y(pt.avgSize || 0);
                 if (!started) { gx.moveTo(px, py); started = true; }
                 else gx.lineTo(px, py);
             }
@@ -2247,7 +2385,49 @@
             graphVisible = !graphVisible;
             document.getElementById('graphPanel').style.display = graphVisible ? 'block' : 'none';
             document.getElementById('graphsBtn').classList.toggle('active', graphVisible);
-            if (graphVisible) { drawGraph(); drawInfectedGraph(); updateGraphLegend(); }
+            if (graphVisible) { drawGraph(); drawSizeGraph(); drawInfectedGraph(); updateGraphLegend(); }
+        });
+
+        function redrawGraphs() {
+            if (graphVisible) { drawGraph(); drawSizeGraph(); drawInfectedGraph(); updateGraphLegend(); }
+        }
+
+        // Crypto-chart controls shared by all graphs:
+        //   Ctrl + scroll -> zoom the time scale (fully out = whole history)
+        //   scroll        -> pan left/right within the chosen scale
+        ['graphCanvas', 'sizeCanvas', 'infectedCanvas'].forEach(id => {
+            let el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('wheel', (e) => {
+                e.preventDefault();   // don't scroll the panel or zoom the browser
+                let len = graphHistory.length;
+                if (len < 2) return;
+
+                if (e.ctrlKey) {
+                    // Zoom: scroll up = zoom in (narrower), down = zoom out (wider).
+                    let curSpan = graphViewSpan === Infinity ? len : Math.min(graphViewSpan, len);
+                    let factor = e.deltaY < 0 ? 0.8 : 1.25;
+                    let newSpan = Math.round(curSpan * factor);
+                    if (newSpan >= len) {
+                        graphViewSpan = Infinity;   // fully zoomed out: first sample → now
+                        graphViewOffset = 0;
+                    } else {
+                        graphViewSpan = Math.max(MIN_GRAPH_SPAN, newSpan);
+                        // keep the right edge in bounds for the new zoom
+                        graphViewOffset = clamp(graphViewOffset, 0, len - graphViewSpan);
+                    }
+                } else {
+                    // Pan sideways within the current scale. No-op when fully out.
+                    let span = graphViewSpan === Infinity ? len : Math.min(graphViewSpan, len);
+                    if (span < len) {
+                        let step = Math.max(1, Math.round(span * 0.15));
+                        // scroll up/left = older (offset up), down/right = newer.
+                        graphViewOffset += (e.deltaY < 0 ? step : -step);
+                        graphViewOffset = clamp(graphViewOffset, 0, len - span);
+                    }
+                }
+                redrawGraphs();
+            }, { passive: false });
         });
 
         function gameLoop() {
@@ -2268,7 +2448,7 @@
             render();
             updateInspector();
             sampleGraph();
-            if (graphVisible) { drawGraph(); drawInfectedGraph(); updateGraphLegend(); }
+            if (graphVisible) { drawGraph(); drawSizeGraph(); drawInfectedGraph(); updateGraphLegend(); }
             requestAnimationFrame(gameLoop);
         }
 
