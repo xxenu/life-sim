@@ -340,6 +340,7 @@
         const BUSH_STAGES = ['poop', 'bush1', 'bush2', 'bush3', 'bush4'];
         const GROWING_BUSH_SIZES = { poop: 20, bush1: 25, bush2: 35, bush3: 45, bush4: 60 };
         const GRASS_SIZE = 25;
+        const GRASS_ENABLED = false;   // temporarily off to save performance
         let gameTime = 0;
         let nextGobletId = 1;
         let selectedGobletId = null;
@@ -1292,7 +1293,7 @@
                 if (gameTime - gb.stageTime >= BUSH_STAGE_DURATION) {
                     if (gb.stage === 0 && !gb.willSprout) {
                         // A poop that never becomes a bush withers into grass.
-                        grasses.push({ x: gb.x, y: gb.y });
+                        if (GRASS_ENABLED) grasses.push({ x: gb.x, y: gb.y });
                         growingBushes.splice(i, 1);
                         continue;
                     }
