@@ -541,18 +541,19 @@
         ];
         function colorToCss(c) { return `rgb(${c.r|0}, ${c.g|0}, ${c.b|0})`; }
 
-        // Family names for the founding goblets. These act like surnames:
-        // a child inherits its father's name.
-        const FAMILY_NAMES = [
-            "Alderson", "Beckson", "Colverson", "Drilson", "Emserson",
-            "Falkson", "Grayson", "Helmson", "Iverson", "Jarveson",
-            "Kempson", "Lightson", "Marlson", "Nelsterson", "Ollison",
-            "Pemberson", "Quinterson", "Ravenson", "Silverson", "Thoreson",
-            "Ulterson", "Valtson", "Welderson", "Xaverson", "Yarlson",
-            "Zepherson", "Asherson", "Brenneson", "Chalkson", "Dantson",
-            "Ellerson", "Fireson", "Greenerson", "Harperson", "Inderson",
-            "Jackerson", "Kairson", "Landerson", "Midson", "Norderson"
-        ];
+        // One family name per starting colour (index-matched to SPAWN_COLORS).
+        // These act like surnames: a child inherits its father's name, so a
+        // whole lineage keeps its founder-colour surname regardless of drift.
+        const FAMILY_NAMES = ["Redson", "Greenson", "Blueson"];
+
+        // The founder's surname is decided by its spawn colour.
+        function familyNameForColor(color) {
+            for (let i = 0; i < SPAWN_COLORS.length; i++) {
+                let c = SPAWN_COLORS[i];
+                if (c.r === color.r && c.g === color.g && c.b === color.b) return FAMILY_NAMES[i];
+            }
+            return FAMILY_NAMES[0];
+        }
 
         // ============================================================================
         // DISEASE
@@ -564,6 +565,78 @@
         const BASE_DEATH_CHANCE = 0.8;    // 1-in-2 chance of dying from an infection
         const IMMUNITY_GAIN = 0.01;        // survivors gain this much resistance (a gene)
         const POOP_INFECT_RADIUS = 27;    // infectious-poop contagion range
+
+        // ============================================================================
+        // COMBAT — being bigger is a survival perk: big goblets can eat babies and
+        // defend their own young.
+        // ============================================================================
+        const PANIC_THRESHOLD = 10;          // hunger/thirst level that triggers panic
+        const ATTACK_RANGE = 45;             // px within which a goblet can strike
+        const ATTACK_COOLDOWN = 2;           // seconds between a goblet's attacks
+        const ATTACK_DAMAGE_PER_SIZE = 0.6;  // damage scales with body size
+        const HIT_FLASH_DURATION = 1;        // seconds a struck goblet flashes white
+        const AGGRO_DURATION = 6;            // seconds a fight stays hot without a hit
+        const HEAL_THRESHOLD = 85;           // hunger & thirst both above this to heal
+        const HEAL_RATE = 4;                 // HP regained per second when well-fed
+        const HP_PER_SIZE = 2.5;             // max HP scales with body size
+
+        // Bigger goblets have a bigger HP pool.
+        function maxHp(g) { return Math.max(1, g.currentSize * HP_PER_SIZE); }
+
+        function inPanic(g) { return g.hunger <= PANIC_THRESHOLD || g.thirst <= PANIC_THRESHOLD; }
+        function attackDamage(g) { return Math.max(1, g.currentSize * ATTACK_DAMAGE_PER_SIZE); }
+
+        // A panicking adult hunts the nearest baby it can see for food — but
+        // never its own child.
+        function findBabyPrey(hunter) {
+            let best = null, bestDist = hunter.genes.sightRange;
+            for (let other of goblets) {
+                if (other === hunter || other.isGrown || other.hp <= 0) continue;
+                if (other.parents && other.parents.includes(hunter.id)) continue;  // spare own kids
+                let d = Math.hypot(hunter.x - other.x, hunter.y - other.y);
+                if (d < bestDist) { bestDist = d; best = other; }
+            }
+            return best;
+        }
+
+        // Land a blow: size-based damage, flash the victim, provoke retaliation,
+        // and rally the victim's father to its defense.
+        function attack(attacker, victim) {
+            victim.hp -= attackDamage(attacker);
+            victim.hitFlashUntil = gameTime + HIT_FLASH_DURATION;
+            attacker.nextAttackTime = gameTime + ATTACK_COOLDOWN;
+            attacker.combatUntil = gameTime + AGGRO_DURATION;
+
+            // Victim fights back.
+            victim.combatTarget = attacker;
+            victim.combatUntil = gameTime + AGGRO_DURATION;
+
+            // The victim's father charges in to protect his child.
+            if (!victim.isGrown && victim.fatherId != null) {
+                for (let g of goblets) {
+                    if (g.id === victim.fatherId) {
+                        g.combatTarget = attacker;
+                        g.combatUntil = gameTime + AGGRO_DURATION;
+                        break;
+                    }
+                }
+            }
+
+            // Death: a slain baby feeds its killer (food and water both restored).
+            if (victim.hp <= 0) {
+                victim.dead = true;
+                if (!victim.isGrown) { attacker.hunger = 100; attacker.thirst = 100; }
+            }
+        }
+
+        // Drop a fight when the foe is gone or the fight has gone cold.
+        function validateCombatTarget(g) {
+            let t = g.combatTarget;
+            if (!t) return;
+            if (t.dead || t.hp <= 0 || gameTime > (g.combatUntil || 0)) {
+                g.combatTarget = null;
+            }
+        }
 
         function createGenes() {
             let idx = Math.floor(Math.random() * SPAWN_COLORS.length);
@@ -664,10 +737,10 @@
             ];
             bushes = bushPoints.map(p => ({ x: p.x, y: p.y, radius: 30, apples: 3, lastRegrow: 0, picked: 0, bornAt: 0, toxic: Math.random() < TOXIC_BUSH_CHANCE, toxicPicked: 0 }));
 
-            // Each founder gets a unique family name, passed down the male line.
-            let nameIdx = 0;
-            for (let i = 0; i < 250; i++) spawnGoblet('male', FAMILY_NAMES[nameIdx++ % FAMILY_NAMES.length]);
-            for (let i = 0; i < 250; i++) spawnGoblet('female', FAMILY_NAMES[nameIdx++ % FAMILY_NAMES.length]);
+            // Founders take the surname of their spawn colour, passed down the
+            // male line thereafter.
+            for (let i = 0; i < 250; i++) spawnGoblet('male');
+            for (let i = 0; i < 250; i++) spawnGoblet('female');
         }
 
         function spawnGoblet(gender, name) {
@@ -694,6 +767,7 @@
                 vx: 0, vy: 0,
                 hunger: 53,
                 thirst: 53,
+                hp: genes.size * HP_PER_SIZE,
                 genes: genes,
                 currentSize: genes.size,
                 state: 'idle',
@@ -708,7 +782,7 @@
                 isGrown: true,
                 restUntil: undefined,
                 id: nextGobletId++,
-                name: name,
+                name: name || familyNameForColor(genes.color),
                 generation: 1,
                 gender: gender || (Math.random() < 0.5 ? 'male' : 'female'),
                 parents: [],
@@ -718,7 +792,10 @@
                 berriesEaten: 0,
                 sick: false,
                 sickUntil: 0,
-                everInfected: false
+                everInfected: false,
+                combatTarget: null,
+                nextAttackTime: 0,
+                hitFlashUntil: 0
             };
             goblets.push(goblet);
             return goblet;
@@ -840,6 +917,7 @@
                 vx: 0, vy: 0,
                 hunger: 100,
                 thirst: 100,
+                hp: startSize * HP_PER_SIZE,
                 genes: childGenes,
                 currentSize: startSize,
                 birthSize: startSize,
@@ -860,13 +938,17 @@
                 generation: Math.max(goblet1.generation, goblet2.generation) + 1,
                 gender: Math.random() < 0.5 ? 'male' : 'female',
                 parents: [goblet1.id, goblet2.id],
+                fatherId: (goblet1.gender === 'male' ? goblet1.id : goblet2.id),
                 age: 0,
                 baseSightRange: childGenes.sightRange,
                 baseSpeed: childGenes.speed,
                 berriesEaten: 0,
                 sick: false,
                 sickUntil: 0,
-                everInfected: false
+                everInfected: false,
+                combatTarget: null,
+                nextAttackTime: 0,
+                hitFlashUntil: 0
             };
 
             goblets.push(child);
@@ -918,10 +1000,14 @@
         }
 
         // Check if heading is blocked by world border or lake (when not thirsty)
+        // Lakes are obstacles to route around EXCEPT when a goblet is actively
+        // heading in to drink. The world border is always an obstacle.
+        function goingToDrink(g) { return g.state === 'seekingWater' && !g.combatTarget; }
+
         function headingBlocked(goblet, angle, maxDist) {
             let sr = maxDist !== undefined ? maxDist : goblet.genes.sightRange;
             let ca = Math.cos(angle), sa = Math.sin(angle);
-            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
+            let avoidLakes = !goingToDrink(goblet);
             let step = 10;
             let margin = GOBLET_SIZE / 2 + 3;
             
@@ -1008,6 +1094,7 @@
                     goblet.hunger -= HUNGER_DECAY_RATE * metabolism(goblet) * deltaTime * 0.1;
                     goblet.thirst -= THIRST_DECAY_RATE * deltaTime * 0.1;
                     if (goblet.hunger <= 0 || goblet.thirst <= 0) {
+                        goblet.dead = true;
                         goblets.splice(i, 1);
                         continue;
                     }
@@ -1020,6 +1107,14 @@
                 goblet.thirst -= THIRST_DECAY_RATE * deltaTime * restMult;
 
                 if (goblet.hunger <= 0 || goblet.thirst <= 0) {
+                    goblet.dead = true;
+                    goblets.splice(i, 1);
+                    continue;
+                }
+
+                // Killed in a fight: HP dropped to zero.
+                if (goblet.hp <= 0) {
+                    goblet.dead = true;
                     goblets.splice(i, 1);
                     continue;
                 }
@@ -1031,6 +1126,7 @@
                 if (goblet.sick && gameTime >= goblet.sickUntil) {
                     let deathChance = Math.max(0, BASE_DEATH_CHANCE - (goblet.genes.immunity || 0));
                     if (Math.random() < deathChance) {
+                        goblet.dead = true;
                         goblets.splice(i, 1);
                         continue;
                     }
@@ -1044,6 +1140,29 @@
                 goblet.genes.speed = goblet.baseSpeed * af;
 
                 if (goblet.reproCooldown > 0) goblet.reproCooldown -= deltaTime;
+
+                // ---- COMBAT ----
+                validateCombatTarget(goblet);
+                // A panicking adult (starving/parched, sprinting) hunts a baby to eat.
+                if (!goblet.combatTarget && goblet.isGrown && inPanic(goblet)) {
+                    let prey = findBabyPrey(goblet);
+                    if (prey) { goblet.combatTarget = prey; goblet.combatUntil = gameTime + AGGRO_DURATION; }
+                }
+                // Strike when in range and off cooldown — movement continues, so
+                // goblets can run while fighting.
+                if (goblet.combatTarget) {
+                    let t = goblet.combatTarget;
+                    if (Math.hypot(goblet.x - t.x, goblet.y - t.y) <= ATTACK_RANGE &&
+                        gameTime >= (goblet.nextAttackTime || 0)) {
+                        attack(goblet, t);
+                    }
+                }
+
+                // Well-fed and hydrated (both above 85%): recover HP over time.
+                let hpMax = maxHp(goblet);
+                if (goblet.hp < hpMax && goblet.hunger > HEAL_THRESHOLD && goblet.thirst > HEAL_THRESHOLD) {
+                    goblet.hp = Math.min(hpMax, goblet.hp + HEAL_RATE * deltaTime);
+                }
 
                 if (!goblet.isGrown) {
                     let range = goblet.genes.size - goblet.birthSize;
@@ -1200,6 +1319,24 @@
         function updateGobletBehavior(goblet, deltaTime) {
             if (goblet.isActing) return;
 
+            // Combat takes over movement: close in on the foe, then plant and
+            // fight — once within attack range neither side can move.
+            if (goblet.combatTarget) {
+                let t = goblet.combatTarget;
+                goblet.commitX = null;
+                goblet.commitY = null;
+                if (Math.hypot(goblet.x - t.x, goblet.y - t.y) <= ATTACK_RANGE) {
+                    goblet.targetX = null;
+                    goblet.targetY = null;
+                    goblet.vx = 0;
+                    goblet.vy = 0;
+                } else {
+                    goblet.targetX = t.x;
+                    goblet.targetY = t.y;
+                }
+                return;
+            }
+
             if (goblet.state === 'seekingWater') {
                 seekResource(goblet, deltaTime, 'water');
             } else if (goblet.state === 'seekingFood') {
@@ -1212,10 +1349,34 @@
             } else {
                 goblet.commitX = null;
                 goblet.commitY = null;
+                if (followFather(goblet, deltaTime)) return;
                 goblet.targetX = null;
                 goblet.targetY = null;
                 wander(goblet, deltaTime);
             }
+        }
+
+        // An un-grown child keeps its father within viewing range: if dad drifts
+        // toward the edge of the child's sight, the child moves to close the gap.
+        // Returns true if the child is shepherding after its father.
+        function followFather(goblet, deltaTime) {
+            if (goblet.isGrown || goblet.fatherId == null) return false;
+            let father = null;
+            for (let g of goblets) { if (g.id === goblet.fatherId) { father = g; break; } }
+            if (!father) return false;   // father died: child is on its own
+
+            let dist = Math.hypot(goblet.x - father.x, goblet.y - father.y);
+            let leash = goblet.genes.sightRange * 0.7;   // stay comfortably in sight
+            if (dist > leash) {
+                goblet.targetX = father.x;
+                goblet.targetY = father.y;
+                goblet.restUntil = undefined;
+            } else {
+                goblet.targetX = null;
+                goblet.targetY = null;
+                wander(goblet, deltaTime);
+            }
+            return true;
         }
 
         function seekResource(goblet, deltaTime, kind) {
@@ -1299,12 +1460,11 @@
                 goblet.restUntil = undefined;
             }
 
-            // Check if heading is blocked, but only if not thirsty (thirsty goblets can enter water)
-            if (goblet.thirst >= THIRST_THRESHOLD) {
-                if (headingBlocked(goblet, goblet.wanderAngle)) {
-                    goblet.wanderAngle = clearHeading(goblet, goblet.wanderAngle);
-                    goblet.restUntil = undefined;
-                }
+            // Steer away from blocked headings: the world border always, and
+            // lakes too unless this goblet is heading in to drink.
+            if (headingBlocked(goblet, goblet.wanderAngle)) {
+                goblet.wanderAngle = clearHeading(goblet, goblet.wanderAngle);
+                goblet.restUntil = undefined;
             }
 
             goblet.vx = Math.cos(goblet.wanderAngle) * WANDER_FORCE;
@@ -1328,23 +1488,21 @@
             if (goblet.sick) {
                 speed *= SICK_SPEED_MULT;
             }
-            let avoidLakes = goblet.thirst >= THIRST_THRESHOLD;
+            let avoidLakes = !goingToDrink(goblet);
 
             let heading;
             let targetAngle = null;
-            
+
             if (goblet.targetX !== null && goblet.targetY !== null) {
                 let dx = goblet.targetX - goblet.x, dy = goblet.targetY - goblet.y;
                 let distToTarget = Math.hypot(dx, dy) || 1;
                 heading = Math.atan2(dy, dx);
                 targetAngle = heading;
 
-                if (avoidLakes) {
-                    let look = Math.max(30, Math.min(distToTarget, goblet.genes.sightRange));
-                    if (headingBlocked(goblet, heading, look)) {
-                        let newHeading = clearHeading(goblet, heading, look, targetAngle);
-                        heading = newHeading;
-                    }
+                // Always route around the border; around lakes unless drinking.
+                let look = Math.max(30, Math.min(distToTarget, goblet.genes.sightRange));
+                if (headingBlocked(goblet, heading, look)) {
+                    heading = clearHeading(goblet, heading, look, targetAngle);
                 }
             } else {
                 if (Math.abs(goblet.vx) + Math.abs(goblet.vy) < 1e-6) {
@@ -1352,9 +1510,9 @@
                     return;
                 }
                 heading = Math.atan2(goblet.vy, goblet.vx);
-                
-                // Check if wander heading is blocked
-                if (avoidLakes && headingBlocked(goblet, heading)) {
+
+                // Check if wander heading is blocked (border always; lakes unless drinking)
+                if (headingBlocked(goblet, heading)) {
                     heading = clearHeading(goblet, heading, undefined, null);
                     goblet.wanderAngle = heading;
                 }
@@ -1568,6 +1726,17 @@
                     ctx.strokeStyle = '#fbbf24';
                     ctx.stroke();
 
+                    // If this goblet is fighting, ring its foe in red.
+                    let foe = goblet.combatTarget;
+                    if (foe && !foe.dead && foe.hp > 0 && goblets.includes(foe)) {
+                        let foeSize = Math.max(10, foe.currentSize);
+                        ctx.beginPath();
+                        ctx.arc(foe.x, foe.y, foeSize / 2 + 6, 0, Math.PI * 2);
+                        ctx.lineWidth = 2.5;
+                        ctx.strokeStyle = '#ef4444';
+                        ctx.stroke();
+                    }
+
                     // Pathfinding visualization
                     let sr = goblet.genes.sightRange;
 
@@ -1648,6 +1817,17 @@
                     ctx.drawImage(outline, dx, dy, size, size);
                 }
 
+                // Just got hit: flash white for a second so fights are visible.
+                if (goblet.hitFlashUntil && gameTime < goblet.hitFlashUntil) {
+                    let flash = getTintedSkin({ r: 255, g: 255, b: 255 });
+                    if (flash) {
+                        ctx.save();
+                        ctx.globalAlpha = 0.85;
+                        ctx.drawImage(flash, dx, dy, size, size);
+                        ctx.restore();
+                    }
+                }
+
                 if (!goblet.isGrown) {
                     let progress = clamp(goblet.currentSize / goblet.genes.size, 0, 1);
                     let barWidth = 20;
@@ -1674,7 +1854,13 @@
                 ctx.fillRect(barX, barY + 3, barWidth, barHeight);
                 ctx.fillStyle = '#2563eb';
                 ctx.fillRect(barX, barY + 3, (goblet.thirst / 100) * barWidth, barHeight);
-                
+
+                // HP bar (green); the bar's max scales with body size.
+                ctx.fillStyle = '#444';
+                ctx.fillRect(barX, barY + 6, barWidth, barHeight);
+                ctx.fillStyle = '#22c55e';
+                ctx.fillRect(barX, barY + 6, clamp(goblet.hp / maxHp(goblet), 0, 1) * barWidth, barHeight);
+
                 if (goblet.isActing && goblet.isMating && assets.hearts) {
                     let hSize = 20;
                     ctx.drawImage(assets.hearts, goblet.x - hSize / 2, goblet.y - size / 2 - hSize - 4, hSize, hSize);
@@ -1885,7 +2071,15 @@
 
         // Deterministic, evenly-spread colour for a surname.
         const nameColorCache = {};
+        // Each surname maps to its founder colour so graph lines match the
+        // goblets they represent.
+        const NAME_GRAPH_COLORS = {
+            Redson:   colorToCss(SPAWN_COLORS[0]),
+            Greenson: colorToCss(SPAWN_COLORS[1]),
+            Blueson:  colorToCss(SPAWN_COLORS[2])
+        };
         function nameColor(name) {
+            if (NAME_GRAPH_COLORS[name]) return NAME_GRAPH_COLORS[name];
             if (nameColorCache[name]) return nameColorCache[name];
             let h = 0;
             for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
